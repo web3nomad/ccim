@@ -1,0 +1,17 @@
+{
+  "description": "Keep a joined session reachable: remind it to listen, deliver held messages when it pauses, tell the relay a human is present.",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ccim\" hook start", "timeout": 5 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ccim\" hook prompt", "timeout": 5 }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ccim\" hook stop", "timeout": 10 }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ccim\" hook end", "timeout": 5 }] }
+    ]
+  }
+}

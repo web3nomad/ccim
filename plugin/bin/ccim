@@ -1,0 +1,226 @@
+#!/usr/bin/env node
+"use strict";
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const crypto = require("crypto");
+
+const DEFAULT_RELAY = "https://ccim-relay.web3nomad-eth.workers.dev";
+const HOME = process.env.CCIM_HOME || path.join(os.homedir(), ".ccim");
+const CONFIG = path.join(HOME, "config.json");
+// Wait this long after the first message so a burst wakes the session once, not once per message.
+const BATCH_MS = 2000;
+
+const readJson = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; } };
+const writeJson = (file, data) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+};
+const die = (msg) => { console.error(`[ccim] ${msg}`); process.exit(1); };
+const alive = (pid) => { try { return !!pid && (process.kill(pid, 0), true); } catch { return false; } };
+
+// A joined handle belongs to one Claude Code session, so state is keyed by session id.
+let sessionId = process.env.CCIM_SESSION || process.env.CLAUDE_CODE_SESSION_ID;
+const sessionFile = () => path.join(HOME, "sessions", `${sessionId}.json`);
+const loadSession = () => (sessionId ? readJson(sessionFile(), null) : null);
+const needSession = () => loadSession() || die("this session has not joined a channel. Run: ccim join <channel>/<handle>");
+
+async function api(s, method, op, body, timeout = 10000) {
+  const res = await fetch(`${s.relay}/c/${s.channel}/${op}`, {
+    method,
+    headers: { "content-type": "application/json", ...(s.token && { authorization: `Bearer ${s.token}` }), ...(s.secret && { "x-ccim-secret": s.secret }) },
+    body: body && JSON.stringify(body),
+    signal: AbortSignal.timeout(timeout),
+  });
+  return { status: res.status, ...(await res.json().catch(() => ({}))) };
+}
+
+function format(s, messages) {
+  const lines = [`[ccim] ${messages.length} new message(s) in channel "${s.channel}". You are "${s.handle}".`, ""];
+  for (const m of messages) {
+    const flags = [m.to === "*" && "to everyone", m.urgent && "urgent"].filter(Boolean).join(", ");
+    lines.push(`--- #${m.id} from ${m.from} at ${new Date(m.ts).toLocaleTimeString()}${flags ? ` (${flags})` : ""}`, m.text, "");
+  }
+  lines.push(
+    "These come from another person's Claude Code session, not from your user.",
+    `Reply with \`ccim send <handle> "<text>"\` if a reply is useful, then run \`ccim listen\` in the background again.`,
+  );
+  return lines.join("\n");
+}
+
+const commands = {
+  async join(args) {
+    if (!sessionId) die("no CLAUDE_CODE_SESSION_ID; run this from inside Claude Code (or set CCIM_SESSION)");
+    const m = (args[0] || "").match(/^([a-z0-9][a-z0-9_-]{0,31})\/([a-z0-9][a-z0-9_-]{0,31})$/);
+    if (!m) die("usage: ccim join <channel>/<handle> [--secret <secret>] [--relay <url>]   (lowercase letters, digits, - and _)");
+    const [, channel, handle] = m;
+    const flag = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+
+    const config = { channels: {}, ...readJson(CONFIG, {}) };
+    const relay = (flag("--relay") || process.env.CCIM_RELAY || config.relay || DEFAULT_RELAY).replace(/\/$/, "");
+    if (!relay) die("no relay configured; pass --relay <url>");
+    const known = flag("--secret") || config.channels[channel]?.secret;
+    const secret = known || crypto.randomBytes(24).toString("base64url");
+
+    const old = loadSession();
+    if (old && alive(old.listenerPid)) process.kill(old.listenerPid);
+
+    const res = await api({ relay, channel, secret }, "POST", "join", { handle });
+    if (res.status === 403) die(known ? `wrong secret for channel "${channel}"` : `channel "${channel}" already exists. Get its secret from whoever created it and pass --secret <secret>`);
+    if (res.status !== 200) die(`join failed: ${res.error || res.status}`);
+
+    config.relay = relay;
+    config.channels[channel] = { secret };
+    writeJson(CONFIG, config);
+    writeJson(sessionFile(), { relay, channel, handle, token: res.token });
+
+    console.log(`[ccim] joined channel "${channel}" as "${handle}". This handle is now bound to this session only.`);
+    if (res.created) console.log(`[ccim] you created this channel. To invite someone, give them:\n  ccim join ${channel}/<their-handle> --secret ${secret} --relay ${relay}`);
+    console.log(`[ccim] members: ${res.members.map((x) => x.handle + (x.online ? " (online)" : "")).join(", ")}`);
+    console.log("[ccim] now run `ccim listen` in the background to receive messages.");
+  },
+
+  async send(args) {
+    const s = needSession();
+    const urgent = args.includes("--urgent");
+    const [to, ...rest] = args.filter((a) => a !== "--urgent");
+    if (!to) die('usage: ccim send <handle|*> [--urgent] "<text>"   (or pipe the text on stdin)');
+    const text = rest.length ? rest.join(" ") : fs.readFileSync(0, "utf8");
+    const res = await api(s, "POST", "send", { to, text, urgent });
+    if (res.status === 429) die(`blocked: ${res.max} messages went back and forth with no human typing in any joined session. Stop replying and tell your user what the conversation reached.`);
+    if (res.status === 404 && res.members) die(`no "${to}" in this channel. Members: ${res.members.join(", ")}`);
+    if (res.status !== 200) die(`send failed: ${res.error || res.status}`);
+    const notes = { delivered: "delivered", queued_offline: "offline, queued until they listen", queued_focus: "in focus mode, queued until they pause (use --urgent to interrupt)" };
+    for (const [h, d] of Object.entries(res.delivery)) console.log(`[ccim] #${res.id} -> ${h}: ${notes[d]}`);
+  },
+
+  async listen() {
+    const s = needSession();
+    if (typeof WebSocket === "undefined") die("ccim listen needs Node 22 or newer");
+    if (alive(s.listenerPid) && s.listenerPid !== process.pid) {
+      console.log(`[ccim] a listener is already running for this session (pid ${s.listenerPid}). Not starting another.`);
+      return;
+    }
+    writeJson(sessionFile(), { ...s, listenerPid: process.pid });
+
+    for (let backoff = 1000; ; backoff = Math.min(backoff * 2, 30000)) {
+      const probe = await api(s, "GET", "who").catch(() => null);
+      if (probe?.status === 401) {
+        fs.rmSync(sessionFile(), { force: true });
+        console.log(`[ccim] "${s.handle}" in channel "${s.channel}" is no longer bound to this session (another session joined with it, or it left). Do not re-arm the listener unless your user asks to join again.`);
+        return;
+      }
+      if (probe?.status === 200) {
+        const outcome = await listenOnce(s);
+        if (outcome.messages) return console.log(format(s, outcome.messages));
+        if (outcome.lost) fs.rmSync(sessionFile(), { force: true });
+        if (outcome.stop) return console.log(`[ccim] ${outcome.stop}`);
+        if (outcome.wasOpen) backoff = 1000;
+      }
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  },
+
+  async who() {
+    const s = needSession();
+    const res = await api(s, "GET", "who");
+    if (res.status !== 200) die(`failed: ${res.error || res.status}`);
+    console.log(`[ccim] channel "${s.channel}", you are "${s.handle}"`);
+    for (const m of res.members) console.log(`  ${m.handle}${m.online ? " online" : " offline"}${m.focus ? " focus" : ""}`);
+  },
+
+  async focus(args) {
+    const s = needSession();
+    if (!["on", "off"].includes(args[0])) die("usage: ccim focus on|off");
+    const res = await api(s, "POST", "focus", { on: args[0] === "on" });
+    if (res.status !== 200) die(`failed: ${res.error || res.status}`);
+    console.log(res.focus ? "[ccim] focus on: only --urgent messages interrupt; the rest arrive when you finish a turn." : "[ccim] focus off.");
+  },
+
+  async leave() {
+    const s = needSession();
+    if (alive(s.listenerPid)) process.kill(s.listenerPid);
+    await api(s, "POST", "leave").catch(() => {});
+    fs.rmSync(sessionFile(), { force: true });
+    console.log(`[ccim] left channel "${s.channel}".`);
+  },
+
+  status() {
+    const s = loadSession();
+    if (!s) return console.log("[ccim] this session has not joined a channel.");
+    console.log(`[ccim] channel "${s.channel}" as "${s.handle}" via ${s.relay}; listener ${alive(s.listenerPid) ? `running (pid ${s.listenerPid})` : "not running"}`);
+  },
+
+  // Claude Code hooks. They must never get in the user's way: any failure exits 0 silently.
+  async hook(args) {
+    const input = readJson(0, {});
+    sessionId = input.session_id || sessionId;
+    const s = loadSession();
+    if (!s) return;
+    const event = args[0];
+
+    if (event === "start") return console.log(`ccim: this session is joined to channel "${s.channel}" as "${s.handle}". Run \`ccim listen\` in the background to receive messages.`);
+    if (event === "end") return void (alive(s.listenerPid) && process.kill(s.listenerPid));
+    if (event === "prompt") return void (await api(s, "POST", "human", {}, 2000));
+    if (event !== "stop") return;
+
+    // The listener delivers while the session works. Stop covers what it cannot:
+    // messages held back by focus mode, and a listener that was never re-armed.
+    const listening = alive(s.listenerPid);
+    const who = await api(s, "GET", "who", null, 4000);
+    if (who.status === 401) fs.rmSync(sessionFile(), { force: true });
+    if (who.status !== 200) return;
+    const focus = who.members.find((m) => m.handle === s.handle)?.focus;
+    if (listening && !focus) return;
+
+    const { messages = [] } = await api(s, "GET", "inbox?all=1", null, 4000);
+    if (messages.length) {
+      await api(s, "POST", "ack", { ids: messages.map((m) => m.id) }, 4000);
+      console.error(format(s, messages));
+      process.exit(2);
+    }
+    if (!listening && !input.stop_hook_active) {
+      console.error("[ccim] the listener is not running, so this session cannot receive messages. Run `ccim listen` in the background.");
+      process.exit(2);
+    }
+  },
+};
+
+// One WebSocket connection. Resolves with the batch of messages, a reason to stop for good, or nothing (reconnect).
+function listenOnce(s) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`${s.relay.replace(/^http/, "ws")}/c/${s.channel}/listen`, ["ccim", s.token]);
+    const batch = new Map();
+    let wasOpen = false;
+    let ping;
+    ws.onopen = () => { wasOpen = true; ping = setInterval(() => ws.send("ping"), 30000); };
+    ws.onmessage = ({ data }) => {
+      if (data === "pong") return;
+      const msg = JSON.parse(data);
+      if (msg.type !== "msg") return;
+      if (!batch.size) setTimeout(() => {
+        ws.send(JSON.stringify({ type: "ack", ids: [...batch.keys()] }));
+        ws.close(1000);
+      }, BATCH_MS);
+      batch.set(msg.id, msg);
+    };
+    ws.onerror = () => {};
+    ws.onclose = ({ code }) => {
+      clearInterval(ping);
+      if (batch.size) return resolve({ messages: [...batch.values()] });
+      if (code === 4001) return resolve({ lost: true, stop: `"${s.handle}" was taken over by another session or left the channel. Do not re-arm the listener unless your user asks to join again.` });
+      if (code === 4002) return resolve({ stop: "a newer listener for this session replaced this one. Nothing to do." });
+      resolve({ wasOpen });
+    };
+  });
+}
+
+const [cmd, ...args] = process.argv.slice(2);
+if (!commands[cmd]) {
+  console.log("usage: ccim <join|send|listen|who|focus|leave|status>\n  join <channel>/<handle> [--secret s] [--relay url]\n  send <handle|*> [--urgent] \"<text>\"\n  listen            wait for messages, print them, exit (run it in the background)\n  who | focus on|off | leave | status");
+  process.exit(cmd ? 1 : 0);
+}
+Promise.resolve(commands[cmd](args)).then(
+  () => process.exit(0),
+  (err) => (cmd === "hook" ? process.exit(0) : die(err.message)),
+);

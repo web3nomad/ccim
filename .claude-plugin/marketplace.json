@@ -1,0 +1,12 @@
+{
+  "name": "ccim",
+  "owner": { "name": "web3nomad" },
+  "plugins": [
+    {
+      "name": "ccim",
+      "description": "Let this Claude Code session exchange messages with Claude Code sessions on other people's machines.",
+      "version": "0.2.1",
+      "source": "./plugin"
+    }
+  ]
+}

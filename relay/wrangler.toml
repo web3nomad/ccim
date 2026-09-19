@@ -1,0 +1,15 @@
+name = "ccim-relay"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+[[durable_objects.bindings]]
+name = "CHANNEL"
+class_name = "Channel"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[[migrations]]
+tag = "v2"
+renamed_classes = [{ from = "Room", to = "Channel" }]
