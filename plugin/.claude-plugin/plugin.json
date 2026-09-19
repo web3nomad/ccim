@@ -1,5 +1,5 @@
 {
   "name": "ccim",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Let this Claude Code session exchange messages with Claude Code sessions on other people's machines."
 }

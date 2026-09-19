@@ -145,6 +145,30 @@ const commands = {
     console.log(`[ccim] left channel "${s.channel}".`);
   },
 
+  async delete(args) {
+    const channel = args[0];
+    if (!channel || channel.startsWith("-")) die("usage: ccim delete <channel> [--secret <secret>]");
+    const config = { channels: {}, ...readJson(CONFIG, {}) };
+    const secret = (args.includes("--secret") && args[args.indexOf("--secret") + 1]) || config.channels[channel]?.secret;
+    if (!secret) die(`no secret for channel "${channel}" on this machine; pass --secret <secret>`);
+    const relay = (process.env.CCIM_RELAY || config.relay || DEFAULT_RELAY).replace(/\/$/, "");
+    const res = await api({ relay, channel, secret }, "POST", "delete");
+    if (res.status === 404) die(`channel "${channel}" does not exist`);
+    if (res.status === 403) die(`wrong secret for channel "${channel}"`);
+    if (res.status !== 200) die(`delete failed: ${res.error || res.status}`);
+
+    delete config.channels[channel];
+    writeJson(CONFIG, config);
+    const dir = path.join(HOME, "sessions");
+    for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
+      const s = readJson(path.join(dir, f), null);
+      if (s?.channel !== channel) continue;
+      if (alive(s.listenerPid)) process.kill(s.listenerPid);
+      fs.rmSync(path.join(dir, f), { force: true });
+    }
+    console.log(`[ccim] deleted channel "${channel}". All members were disconnected and its queued messages are gone.`);
+  },
+
   status() {
     const s = loadSession();
     if (!s) return console.log("[ccim] this session has not joined a channel.");
@@ -210,6 +234,7 @@ function listenOnce(s) {
       if (batch.size) return resolve({ messages: [...batch.values()] });
       if (code === 4001) return resolve({ lost: true, stop: `"${s.handle}" was taken over by another session or left the channel. Do not re-arm the listener unless your user asks to join again.` });
       if (code === 4002) return resolve({ stop: "a newer listener for this session replaced this one. Nothing to do." });
+      if (code === 4003) return resolve({ lost: true, stop: `channel "${s.channel}" was deleted. Do not re-arm the listener.` });
       resolve({ wasOpen });
     };
   });
@@ -217,7 +242,7 @@ function listenOnce(s) {
 
 const [cmd, ...args] = process.argv.slice(2);
 if (!commands[cmd]) {
-  console.log("usage: ccim <join|send|listen|who|focus|leave|status>\n  join <channel>/<handle> [--secret s] [--relay url]\n  send <handle|*> [--urgent] \"<text>\"\n  listen            wait for messages, print them, exit (run it in the background)\n  who | focus on|off | leave | status");
+  console.log("usage: ccim <join|send|listen|who|focus|leave|delete|status>\n  join <channel>/<handle> [--secret s] [--relay url]\n  send <handle|*> [--urgent] \"<text>\"\n  listen            wait for messages, print them, exit (run it in the background)\n  who | focus on|off | leave | status\n  delete <channel> [--secret s]   delete the whole channel for everyone");
   process.exit(cmd ? 1 : 0);
 }
 Promise.resolve(commands[cmd](args)).then(

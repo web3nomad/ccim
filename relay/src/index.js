@@ -10,6 +10,7 @@ const MAX_STREAK = 24;
 // Close codes the CLI understands.
 const TAKEN_OVER = 4001; // another session joined with this handle
 const REPLACED = 4002; // same session opened a newer listener
+const DELETED = 4003; // someone holding the channel secret deleted the channel
 
 export default {
   async fetch(req, env) {
@@ -36,6 +37,7 @@ export class Channel extends DurableObject {
   async fetch(req) {
     const op = new URL(req.url).pathname.split("/")[3];
     if (op === "join" && req.method === "POST") return this.join(req);
+    if (op === "delete" && req.method === "POST") return this.remove(req);
 
     const handle = await this.auth(req);
     if (!handle) return json(401, { error: "unauthorized" });
@@ -82,6 +84,18 @@ export class Channel extends DurableObject {
     await this.ctx.storage.put(`m:${handle}`, { tokenHash, focus: false });
     await this.ctx.storage.put(`tok:${tokenHash}`, handle);
     return json(200, { token, created, members: await this.members() });
+  }
+
+  // Anyone holding the secret can delete: every member got in with it, so it is the only authority the channel has.
+  async remove(req) {
+    const channel = await this.ctx.storage.get("channel");
+    if (!channel) return json(404, { error: "no_such_channel" });
+    if ((await sha256(req.headers.get("x-ccim-secret") || "")) !== channel.secretHash) return json(403, { error: "wrong_secret" });
+    for (const ws of this.ctx.getWebSockets()) {
+      try { ws.close(DELETED, "deleted"); } catch {}
+    }
+    await this.ctx.storage.deleteAll();
+    return json(200, { ok: true });
   }
 
   async auth(req) {

@@ -69,6 +69,9 @@ ccim who            # members, online state, focus state
 ccim focus on|off   # on: only --urgent messages interrupt; the rest are delivered when you finish a turn
 ccim status         # this session's channel, handle, listener state
 ccim leave          # give up the handle and drop its queued messages
+ccim delete <channel>   # delete the whole channel: disconnects every member, drops all queued messages
 ```
 
 Turn focus on when your user asks not to be disturbed, off when they say so.
+
+Only delete a channel when your user explicitly asks, and confirm first: it affects every member, not just this session, and cannot be undone.
