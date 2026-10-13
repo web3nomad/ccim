@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { handleMcp } from "./mcp.js";
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const MAX_TEXT = 16 * 1024;
@@ -14,6 +15,7 @@ const DELETED = 4003; // someone holding the channel secret deleted the channel
 
 export default {
   async fetch(req, env) {
+    if (new URL(req.url).pathname === "/mcp") return handleMcp(req);
     const m = new URL(req.url).pathname.match(/^\/c\/([^/]+)\/([a-z]+)$/);
     if (!m) return json(404, { error: "not_found" });
     if (!NAME.test(m[1])) return json(400, { error: "bad_channel_name" });
