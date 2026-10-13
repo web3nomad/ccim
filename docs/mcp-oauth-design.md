@@ -7,7 +7,7 @@
 ## 阶段
 
 - **阶段 0（已部署，版本 97541cac）**：`POST /mcp` 只有只读探针 `ccim_probe`。2026-10-13 13:36:38 UTC 收到 `openai-mcp/1.0.0` 的调用，nonce `a0c57100-…` 与 Dot 对话里报的一致：Dot 能用自定义 MCP。
-- **阶段 1（本分支 `mcp-oauth`，未部署）**：OAuth + `ccim_who`、`ccim_inbox`、`ccim_ack`、`ccim_send`。
+- **阶段 1（已上线，2026-10-14）**：OAuth + `ccim_who`、`ccim_inbox`、`ccim_ack`、`ccim_send`。Dot 已实测授权、收、ack、发、重试去重、撤销与重新授权。
 - 不做：主动推送（MCP Events，可选功能）、常驻模型、自动唤醒。
 
 ## 文件
@@ -36,7 +36,7 @@
 
 - 资源标识：`https://ccim.web3nomad.com`（OpenAI 文档写的是 origin）和 `https://ccim.web3nomad.com/mcp` 都接受，其他 `resource` 回 `invalid_target`。不带 `resource` 时按 origin 处理。token 记下签发时的 resource，`/mcp` 每次校验。
 - 授权服务器元数据：`issuer`、`authorization_endpoint`、`token_endpoint`、`registration_endpoint`、`revocation_endpoint`，`response_types_supported: ["code"]`，`grant_types_supported: ["authorization_code","refresh_token"]`，`code_challenge_methods_supported: ["S256"]`，`token_endpoint_auth_methods_supported: ["none"]`，`client_id_metadata_document_supported: true`，`authorization_response_iss_parameter_supported: true`，`scopes_supported: ["ccim:read","ccim:write"]`。
-- 客户端登记：CIMD 和 DCR 都支持，ChatGPT 选哪个都行，不写死 client_id。
+- 客户端登记：默认只走 DCR，不写死 client_id。CIMD 代码保留，但默认关闭（元数据 `client_id_metadata_document_supported: false`），设 var `OAUTH_CIMD=on` 才打开。原因：线上 ChatGPT 优先用 CIMD，而 chatgpt.com 对 Worker 去取它的 `client.json` 一律回 403 挑战页，授权页只能显示 "Unknown client"。关掉 CIMD 后，在 ChatGPT 里删掉连接重新添加，它就改走 DCR 了。
   - CIMD：client_id 是 https 地址。服务端去取：不跟随重定向，主机不能是 IP，5 秒超时，64 KB 上限，文档里 `client_id` 必须等于 URL，要支持 `none`，缓存 10 分钟。
   - DCR：只接受 public 客户端，最多 100 个。
   - 两种都要求 redirect_uri 是 https 且主机在 `OAUTH_REDIRECT_HOSTS`（部署值 `chatgpt.com`），不在里面的直接丢掉。这样就算有人自己注册了一个客户端，授权码也只会回到 chatgpt.com。
@@ -98,15 +98,21 @@ CCIM 没有账号，首版也不加。授权页填三项：频道、成员名（
 - `test/policy.test.js`：redirect 白名单、CIMD 校验、scope、配置缺项不启用、元数据字段、未启用时工具隐藏。
 - `test/flow.test.js`：起一个本地 `wrangler dev`（全新存储，测试自己生成的 secret 和密钥），再用一个本地 HTTP 服务扮演 ChatGPT（发布 CIMD 文档）。覆盖：发现元数据；无 token/坏 token 的 401 与 `WWW-Authenticate`；授权请求的各种拒绝（未知客户端、redirect 不一致、缺 PKCE、plain、错 response_type、错 resource）并带 state 和 iss；错 secret、不允许的组合、CLI 已占用 xd-dot 时拒绝且对方 token 仍有效；5 次失败作废；拒绝授权；授权码错 verifier/重用/错 redirect/错 client/错 resource，重用后已发 token 失效；四个工具；身份参数被拒；send 同 id 重试不重复投递、不同内容 409；inbox 不 ack、分页、ack 后消失；24 条限流（重复不计数，CLI 的 human 重置仍有效）；只读 scope 不能发送；refresh 轮换、重用旧 refresh 作废整个授权、不能扩 scope、不能换 client；重新连接复用成员、离线期间的消息还在；撤销端点；CLI 抢占 xd-dot 后授权失效且 CLI 成员正常；管理页撤销和"撤销并离开"；DCR；授权页安全头；原有 API 不变（最新 join 抢占、错 secret、新建频道、真实 `plugin/bin/ccim` CLI 的 join/send/who）；日志和响应里没有 secret、密钥、token。
 
+## 线上实测（2026-10-14）
+
+- 登记方式：DCR（client_id 形如 `dcr_…`）。撤销后重新授权，ChatGPT 复用了同一个 client，没有再注册。
+- `resource`：`https://ccim.web3nomad.com/mcp`。
+- 回跳地址：`https://chatgpt.com/connector/oauth/{callback_id}`。
+- scope：`ccim:read ccim:write`。
+- token 端点的 UA：`openai-connectors-oauth/1.0`；MCP 请求的 UA：`openai-mcp/1.0.0`；发现请求的 UA：`Python aiohttp`。
+- Dot 调 `ccim_ack`、`ccim_send` 时，没有要求 XD 点批准。
+
 ## 未验证
 
-- ChatGPT 实际走 CIMD 还是 DCR、实际发的 `resource` 值（origin 还是带 `/mcp`）、用哪个回跳地址（`/connector/oauth/{callback_id}` 还是 `/connector_platform_oauth_redirect`）。代码两种都支持；回跳地址的主机都是 `chatgpt.com`。如果 ChatGPT 的 CIMD 文档或回跳在别的主机上，要把那个主机加到 `OAUTH_REDIRECT_HOSTS`。
-- ChatGPT 的 CIMD 文档 URL 所在主机能否被 Worker 访问（Worker 出站 fetch）。
-- ChatGPT 会不会请求 OIDC scope（openid 等）：我们没声明，收到会忽略。
-- ChatGPT 是否接受 opaque token（文档列的校验项是服务端自己做的，不要求 JWT）。
-- Dot 调用写操作（send/ack）时会不会每次都要 XD 批准。
+- 线上：冒充其他成员被拒、24 条限流、refresh token 刷新、"只撤销"时成员和消息是否保留（本地测试都覆盖了）。
+- ChatGPT 断开连接时会不会调用 `/oauth/revoke`。
 - 本地测试用 http://localhost 代替 https，CIMD 抓取和 redirect 校验在本地放宽了 https 要求（只在 issuer 是 localhost 时）。
 
-## 部署变更（交给 XD 确认）
+## 部署变更
 
-见交付消息。
+见 `docs/mcp-oauth-rollout.md`。

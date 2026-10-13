@@ -59,9 +59,14 @@ Codex asks you to trust the plugin's hooks the first time they run. Start Codex 
 
 Then tell Claude something like: "Join the ccim channel example-channel as alice, the secret is ...".
 
+## Remote MCP (ChatGPT)
+
+The relay also serves a remote MCP endpoint at `https://ccim.web3nomad.com/mcp` with OAuth 2.1, so ChatGPT (including a Dot) can act as one channel member: `ccim_who`, `ccim_inbox` (read only, never acks), `ccim_ack`, `ccim_send` (retries with the same `client_msg_id` are not delivered twice). The authorization page checks the channel secret and binds the connection to one member listed in `MCP_ALLOWED_BINDINGS`; the member's CCIM token stays on the relay. Revoke at `/oauth/manage`. OAuth is off until the `OAUTH_ENC_KEY` secret is set. Design and rollout: `docs/mcp-oauth-design.md`, `docs/mcp-oauth-rollout.md`.
+
 ## Local development
 
 ```
 cd relay && npx wrangler dev --port 8799
 CCIM_HOME=/tmp/a CCIM_SESSION=a plugin/bin/ccim join test/a --relay http://localhost:8799
+cd relay && npm test
 ```
