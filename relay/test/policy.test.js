@@ -67,12 +67,12 @@ test("CIMD is off unless OAUTH_CIMD=on, so ChatGPT falls back to DCR", () => {
   assert.equal(serverMetadata(settings({ ...env, OAUTH_CIMD: "on" })).client_id_metadata_document_supported, true);
 });
 
-test("ChatGPT's real client document (fetched 2026-10-14) passes; its redirect is kept exactly", () => {
-  const url = "https://chatgpt.com/oauth/gp99i9jq8Tav/client.json";
+test("ChatGPT's real client document (shape as fetched 2026-10-14, callback id replaced) passes; its redirect is kept exactly", () => {
+  const url = "https://chatgpt.com/oauth/exampleCbId01/client.json";
   const doc = {
     client_id: url,
     client_uri: "https://chatgpt.com/",
-    redirect_uris: ["https://chatgpt.com/connector/oauth/gp99i9jq8Tav"],
+    redirect_uris: ["https://chatgpt.com/connector/oauth/exampleCbId01"],
     token_endpoint_auth_method: "private_key_jwt",
     token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
     grant_types: ["authorization_code", "refresh_token"],
@@ -81,7 +81,7 @@ test("ChatGPT's real client document (fetched 2026-10-14) passes; its redirect i
     token_endpoint_auth_signing_alg: "RS256",
     jwks_uri: "https://chatgpt.com/oauth/jwks.json",
   };
-  assert.deepEqual(validateCimd(url, doc, prod), { clientId: url, name: "ChatGPT", redirectUris: ["https://chatgpt.com/connector/oauth/gp99i9jq8Tav"] });
+  assert.deepEqual(validateCimd(url, doc, prod), { clientId: url, name: "ChatGPT", redirectUris: ["https://chatgpt.com/connector/oauth/exampleCbId01"] });
   assert.ok(!validateCimd(url, doc, prod).redirectUris.includes("https://chatgpt.com/connector/oauth/other"));
 });
 
