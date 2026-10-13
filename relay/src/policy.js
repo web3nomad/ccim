@@ -23,7 +23,7 @@ export const serverMetadata = (cfg) => ({
   token_endpoint_auth_methods_supported: ["none"],
   revocation_endpoint_auth_methods_supported: ["none"],
   scopes_supported: SCOPES,
-  client_id_metadata_document_supported: true,
+  client_id_metadata_document_supported: !!cfg.cimd,
   authorization_response_iss_parameter_supported: true,
 });
 

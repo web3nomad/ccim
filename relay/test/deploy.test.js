@@ -58,7 +58,7 @@ const client = createServer((req, res) => {
 await new Promise((r) => client.listen(0, "127.0.0.1", r));
 const CIMD = `http://localhost:${client.address().port}/cimd.json`;
 const CALLBACK = `http://localhost:${client.address().port}/callback`;
-const oauthVars = (key) => ({ OAUTH_ISSUER: BASE, MCP_ALLOWED_BINDINGS: "xd-bridge/xd-dot", OAUTH_REDIRECT_HOSTS: "localhost", ...(key && { OAUTH_ENC_KEY: key }) });
+const oauthVars = (key) => ({ OAUTH_ISSUER: BASE, MCP_ALLOWED_BINDINGS: "xd-bridge/xd-dot", OAUTH_REDIRECT_HOSTS: "localhost", OAUTH_CIMD: "on", ...(key && { OAUTH_ENC_KEY: key }) });
 
 after(async () => {
   if (relay) await stop();
@@ -177,6 +177,35 @@ test("different key B: grant ends cleanly (401, no 500), reconnect refused until
   tokens = await connect();
   assert.equal((await tool("ccim_who", {}, tokens.access_token)).structuredContent.you, "xd-dot");
   assert.equal((await tool("ccim_inbox", {}, tokens.access_token)).content[0].text, "No unacknowledged messages.");
+  await stop();
+});
+
+test("production default (OAUTH_CIMD unset): metadata says no CIMD, a CIMD client is refused, DCR connects", async () => {
+  const { OAUTH_CIMD, ...vars } = oauthVars(KEY_B);
+  await start(RELAY_DIR, vars);
+  const as = (await http("GET", "/.well-known/oauth-authorization-server")).data;
+  assert.equal(as.client_id_metadata_document_supported, false);
+  assert.equal(as.registration_endpoint, `${BASE}/oauth/register`);
+
+  const q = new URLSearchParams({ response_type: "code", client_id: CIMD, redirect_uri: CALLBACK, state: "s", code_challenge: "A".repeat(43), code_challenge_method: "S256", resource: `${BASE}/mcp` });
+  assert.match((await http("GET", `/oauth/authorize?${q}`)).text, /Unknown client/);
+  for (let i = 0; i < 20 && !/"reason":"cimd_disabled"/.test(relayLog); i++) await new Promise((r) => setTimeout(r, 250));
+  assert.match(relayLog, /"reason":"cimd_disabled"/);
+
+  // What ChatGPT does when CIMD is not offered: register, then authorize with resource=<issuer>/mcp.
+  const reg = await http("POST", "/oauth/register", { body: { client_name: "ChatGPT", redirect_uris: [CALLBACK], token_endpoint_auth_method: "none" } });
+  assert.equal(reg.status, 201);
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  const q2 = new URLSearchParams({ response_type: "code", client_id: reg.data.client_id, redirect_uri: CALLBACK, state: "s2", code_challenge: challenge, code_challenge_method: "S256", resource: `${BASE}/mcp`, scope: "ccim:read ccim:write" });
+  const page = await http("GET", `/oauth/authorize?${q2}`);
+  const request = page.text.match(/name="request" value="([0-9a-f]{32})"/)[1];
+  const posted = await http("POST", "/oauth/authorize", { form: { request, channel: "xd-bridge", member: "xd-dot", secret: SECRET, action: "allow" } });
+  const loc = new URL(posted.headers.get("location"));
+  assert.equal(loc.searchParams.get("iss"), BASE);
+  const t = await http("POST", "/oauth/token", { form: { grant_type: "authorization_code", code: loc.searchParams.get("code"), redirect_uri: CALLBACK, client_id: reg.data.client_id, code_verifier: verifier, resource: `${BASE}/mcp` } });
+  assert.equal(t.status, 200, t.text);
+  assert.equal((await tool("ccim_who", {}, t.data.access_token)).structuredContent.you, "xd-dot");
   await stop();
 });
 

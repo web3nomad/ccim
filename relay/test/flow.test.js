@@ -41,7 +41,7 @@ before(async () => {
   CALLBACK = `http://localhost:${CLIENT_PORT}/callback`;
 
   persist = mkdtempSync(join(tmpdir(), "ccim-flow-"));
-  const vars = { OAUTH_ISSUER: BASE, MCP_ALLOWED_BINDINGS: "xd-bridge/xd-dot", OAUTH_REDIRECT_HOSTS: "localhost", OAUTH_ENC_KEY: ENC_KEY };
+  const vars = { OAUTH_ISSUER: BASE, MCP_ALLOWED_BINDINGS: "xd-bridge/xd-dot", OAUTH_REDIRECT_HOSTS: "localhost", OAUTH_CIMD: "on", OAUTH_ENC_KEY: ENC_KEY };
   relay = spawn(join(RELAY_DIR, "node_modules", ".bin", "wrangler"), ["dev", "--local", "--port", String(PORT), "--persist-to", persist, "--show-interactive-dev-session=false", ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`])], { cwd: RELAY_DIR, stdio: ["ignore", "pipe", "pipe"] });
   relay.stdout.on("data", (d) => (relayLog += d));
   relay.stderr.on("data", (d) => (relayLog += d));

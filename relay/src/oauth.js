@@ -77,21 +77,25 @@ export class Auth extends DurableObject {
   }
 
   async cimdClient(url) {
-    if (!this.cimdUrlAllowed(url)) return null;
+    // Each refusal is logged with the document's host and a reason, so a failed connection can be diagnosed.
+    const refuse = (reason, extra = {}) => (log("oauth_cimd_refused", { host: hostOf(url), reason, ...extra }), null);
+    if (!this.cfg.cimd) return refuse("cimd_disabled");
+    if (!this.cimdUrlAllowed(url)) return refuse("url_not_allowed");
     const cached = await this.ctx.storage.get(`cimd:${url}`);
     if (cached && Date.now() - cached.fetchedAt < CIMD_TTL) return cached.client;
     let doc;
     try {
       const res = await fetch(url, { redirect: "manual", headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) });
-      if (res.status !== 200) return null;
+      if (res.status !== 200) return refuse("fetch_status", { status: res.status });
       const text = await res.text();
-      if (text.length > 64 * 1024) return null;
+      if (text.length > 64 * 1024) return refuse("too_large");
       doc = JSON.parse(text);
-    } catch {
-      return null;
+    } catch (e) {
+      return refuse("fetch_failed", { error: String(e?.name || e).slice(0, 60) });
     }
     const client = validateCimd(url, doc, this.cfg);
-    if (client) await this.ctx.storage.put(`cimd:${url}`, { client, fetchedAt: Date.now() });
+    if (!client) return refuse("invalid_document");
+    await this.ctx.storage.put(`cimd:${url}`, { client, fetchedAt: Date.now() });
     return client;
   }
 
@@ -459,6 +463,7 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
   }
 }
 
+const hostOf = (raw) => { try { return new URL(raw).host; } catch { return ""; } };
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const tokenError = (status, error, description) => json(status, { error, error_description: description }, NO_STORE);
 

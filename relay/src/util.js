@@ -33,6 +33,10 @@ export function settings(env) {
     resources: [issuer, `${issuer}/mcp`],
     bindings,
     redirectHosts,
+    // Client metadata documents (CIMD) need this relay to fetch the client's document. chatgpt.com answers
+    // fetches from a Worker with a 403 challenge page, so CIMD is off unless OAUTH_CIMD is "on"; ChatGPT
+    // then registers with DCR instead.
+    cimd: env.OAUTH_CIMD === "on",
     ready: !!issuer && keyOk && !!env.AUTH && bindings.length > 0,
   };
 }
