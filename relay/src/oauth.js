@@ -223,8 +223,8 @@ export class Auth extends DurableObject {
     const key = `member:${channel}/${member}`;
     const stored = await this.ctx.storage.get(key);
     if (stored) {
-      const token = await unseal(this.env, key, stored.sealed);
-      const who = await channelApi(this.env, channel, "GET", "who", null, { token });
+      const token = await this.memberToken(key, stored);
+      const who = token ? await channelApi(this.env, channel, "GET", "who", null, { token }) : {};
       if (who.status === 200 && who.you === member) return { reused: true };
       // Someone else joined with this name (or it left); that token is dead. Do not take the name back.
       await this.ctx.storage.delete(key);
@@ -353,8 +353,23 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
     if (!cfg.bindings.some((b) => b.channel === grant.channel && b.member === grant.member)) return { error: "invalid_token", description: "this member is no longer enabled" };
     const key = `member:${grant.channel}/${grant.member}`;
     const stored = await this.ctx.storage.get(key);
-    if (!stored) return { error: "invalid_token", description: "the channel membership is gone; connect again" };
-    return { grant: at.grantId, channel: grant.channel, member: grant.member, scopes: at.scope.split(" "), memberToken: await unseal(this.env, key, stored.sealed) };
+    const memberToken = stored && (await this.memberToken(key, stored));
+    if (!memberToken) {
+      await this.revokeBinding(grant.channel, grant.member, stored ? "member_token_unreadable" : "member_gone");
+      return { error: "invalid_token", description: "the channel membership is gone; connect again" };
+    }
+    return { grant: at.grantId, channel: grant.channel, member: grant.member, scopes: at.scope.split(" "), memberToken };
+  }
+
+  // A stored member token that no longer decrypts (OAUTH_ENC_KEY was replaced) is dropped: it can never be used again.
+  async memberToken(key, stored) {
+    try {
+      return await unseal(this.env, key, stored.sealed);
+    } catch {
+      await this.ctx.storage.delete(key);
+      log("oauth_member_token_unreadable", { member: key.slice("member:".length) });
+      return null;
+    }
   }
 
   // The channel no longer accepts the member token (someone else took the name, or it left).
@@ -407,8 +422,8 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
         const key = `member:${channel}/${member}`;
         const stored = await this.ctx.storage.get(key);
         if (action === "revoke_leave" && stored) {
-          const token = await unseal(this.env, key, stored.sealed);
-          const who = await channelApi(this.env, channel, "GET", "who", null, { token });
+          const token = await this.memberToken(key, stored);
+          const who = token ? await channelApi(this.env, channel, "GET", "who", null, { token }) : {};
           if (who.status === 200 && who.you === member) await channelApi(this.env, channel, "POST", "leave", {}, { token });
           await this.ctx.storage.delete(key);
         }
