@@ -1,102 +1,112 @@
-# CCIM 远程 MCP + OAuth 设计（草案）
+# CCIM 远程 MCP + OAuth
 
-目标：让 Dot（ChatGPT）通过远程 MCP 直接调用 CCIM，身份固定为 `xd-bridge/xd-dot`。原有 CLI、WebSocket、成员凭据、Mac 上的桥接都不动。
+让 Dot（ChatGPT）通过远程 MCP 直接调用 CCIM，身份固定为 `xd-bridge/xd-dot`。原有 CLI、WebSocket、成员凭据、Mac 上的桥接都不动。
 
 依据（2026-10-13 读过）：developers.openai.com/plugins/build/auth、/deploy/connect-chatgpt、/quickstart、/build/mcp-events，learn.chatgpt.com/docs/dots/computers-and-apps。
 
-## 分阶段
+## 阶段
 
-- **阶段 0（本分支已写好）**：`POST /mcp` 只有一个只读工具 `ccim_probe`，不需要授权，不读频道数据，只返回固定标记和一次性 nonce（同时写进 Worker 日志）。用来确认两件事：XD 的账号能在 ChatGPT 里添加自定义 MCP 服务器；**Dot 本人**能调用它。两件都确认之前，不写 OAuth。
-- **阶段 1**：OAuth + 四个工具。下面是设计。
-- 不做：主动推送（MCP Events）、常驻模型、自动唤醒。
+- **阶段 0（已部署，版本 97541cac）**：`POST /mcp` 只有只读探针 `ccim_probe`。2026-10-13 13:36:38 UTC 收到 `openai-mcp/1.0.0` 的调用，nonce `a0c57100-…` 与 Dot 对话里报的一致：Dot 能用自定义 MCP。
+- **阶段 1（本分支 `mcp-oauth`，未部署）**：OAuth + `ccim_who`、`ccim_inbox`、`ccim_ack`、`ccim_send`。
+- 不做：主动推送（MCP Events，可选功能）、常驻模型、自动唤醒。
 
-## 地址
+## 文件
 
-同一个 Worker、同一个域名 `https://ccim.web3nomad.com`，不新增域名：
+- `relay/src/mcp.js`：MCP 端点和四个工具。
+- `relay/src/oauth.js`：授权服务器（新 Durable Object `Auth`）：授权页、token、撤销、DCR、管理页。
+- `relay/src/policy.js`：元数据、redirect/CIMD/scope 校验（纯函数）。
+- `relay/src/util.js`：配置读取、加密、调用频道 API。
+- `relay/src/index.js`：路由；频道 API 加三个可选能力（见下）。
+- `relay/wrangler.toml`：`AUTH` 绑定、迁移 `v3`、三个 var。
 
-| 路径 | 用途 | 谁来请求 |
+## 地址（同域 `https://ccim.web3nomad.com`）
+
+| 路径 | 方法 | 谁来请求 |
 |---|---|---|
-| `/mcp` | MCP（Streamable HTTP，无状态，只回 JSON，不开 SSE） | OpenAI 服务器 |
-| `/.well-known/oauth-protected-resource`（以及 `/.well-known/oauth-protected-resource/mcp`） | 资源元数据 | OpenAI 服务器 |
-| `/.well-known/oauth-authorization-server` | 授权服务器元数据 | OpenAI 服务器 |
-| `/oauth/authorize` | 授权页（GET 显示表单，POST 提交） | XD 的浏览器 |
-| `/oauth/token`、`/oauth/revoke`、`/oauth/register` | 换 token、撤销、DCR | OpenAI 服务器 |
+| `/mcp` | POST | OpenAI 服务器 |
+| `/.well-known/oauth-protected-resource`、`/.well-known/oauth-protected-resource/mcp` | GET | OpenAI 服务器 |
+| `/.well-known/oauth-authorization-server` | GET | OpenAI 服务器 |
+| `/oauth/token`、`/oauth/register`、`/oauth/revoke` | POST | OpenAI 服务器 |
+| `/oauth/authorize` | GET、POST | XD 的浏览器 |
+| `/oauth/manage` | GET、POST | XD 的浏览器 |
 
-`/c/*` 现有 API 原样保留。
+没设 `OAUTH_ENC_KEY` 时，`/.well-known/oauth-*` 和 `/oauth/*` 都回 503，`/mcp` 只列出探针。阶段 1 的代码可以先部署、不启用。
 
 ## OAuth
 
-- 资源标识：`https://ccim.web3nomad.com`（OpenAI 文档写的是 origin）。也接受 `https://ccim.web3nomad.com/mcp`，两者之外的 `resource` 一律拒绝；token 的受众记为请求时的那个值，`/mcp` 校验受众属于这两个之一。ChatGPT 实际发哪个值未验证，阶段 1 上线时看日志。
-- 授权服务器元数据：`issuer`=`https://ccim.web3nomad.com`，`response_types_supported: ["code"]`，`grant_types_supported: ["authorization_code","refresh_token"]`，`code_challenge_methods_supported: ["S256"]`（只接受 S256），`token_endpoint_auth_methods_supported: ["none"]`，`client_id_metadata_document_supported: true`，`registration_endpoint`，`authorization_response_iss_parameter_supported: true`，`scopes_supported: ["ccim:read","ccim:write"]`，`revocation_endpoint`。
-- 客户端登记：首选 CIMD（client_id 本身是 HTTPS 地址，服务端去取元数据文档）。取文档的限制：只 https、不跟随重定向、主机不能是 IP、5 秒超时、64 KB 上限、文档里的 `client_id` 必须等于该 URL、缓存 10 分钟。DCR 作为后备，只接受 https 的 `redirect_uris`，客户端为 public（`none`）。不写死 ChatGPT 的 client_id。`private_key_jwt` 首版不支持（ChatGPT 的 CIMD 也声明支持 `none`）。
-- 授权请求：`redirect_uri` 必须与客户端元数据里的某一项逐字相等；`state` 原样带回；成功和失败的回跳都带 `iss`；缺 `code_challenge` 或方法不是 S256 直接拒绝。
-- 授权码：60 秒有效，单次使用；与 client_id、redirect_uri、code_challenge、resource、绑定的成员一起存。第二次使用同一个码 → 拒绝，并撤销用它签发过的 token。
-- Token：不透明随机串，服务端只存 SHA-256。access token 1 小时；refresh token 30 天，每次刷新轮换，旧 refresh token 再被用 → 整个授权作废。
-- 撤销：`/oauth/revoke`（RFC 7009）给客户端用；另外授权页旁有一个"管理"表单：输入频道 secret，列出该频道的 OAuth 授权，可以逐个撤销（撤销时可选同时让该成员离开频道）。
+- 资源标识：`https://ccim.web3nomad.com`（OpenAI 文档写的是 origin）和 `https://ccim.web3nomad.com/mcp` 都接受，其他 `resource` 回 `invalid_target`。不带 `resource` 时按 origin 处理。token 记下签发时的 resource，`/mcp` 每次校验。
+- 授权服务器元数据：`issuer`、`authorization_endpoint`、`token_endpoint`、`registration_endpoint`、`revocation_endpoint`，`response_types_supported: ["code"]`，`grant_types_supported: ["authorization_code","refresh_token"]`，`code_challenge_methods_supported: ["S256"]`，`token_endpoint_auth_methods_supported: ["none"]`，`client_id_metadata_document_supported: true`，`authorization_response_iss_parameter_supported: true`，`scopes_supported: ["ccim:read","ccim:write"]`。
+- 客户端登记：CIMD 和 DCR 都支持，ChatGPT 选哪个都行，不写死 client_id。
+  - CIMD：client_id 是 https 地址。服务端去取：不跟随重定向，主机不能是 IP，5 秒超时，64 KB 上限，文档里 `client_id` 必须等于 URL，要支持 `none`，缓存 10 分钟。
+  - DCR：只接受 public 客户端，最多 100 个。
+  - 两种都要求 redirect_uri 是 https 且主机在 `OAUTH_REDIRECT_HOSTS`（部署值 `chatgpt.com`），不在里面的直接丢掉。这样就算有人自己注册了一个客户端，授权码也只会回到 chatgpt.com。
+- 授权请求：redirect_uri 与客户端登记的逐字相等；只收 S256；state 原样带回；成功和失败的回跳都带 `iss`。client 或 redirect 不对时显示错误页，不回跳。
+- 授权码：60 秒，单次使用，绑定 client_id、redirect_uri、code_challenge、resource。同一个码用第二次 → 拒绝并作废该授权。
+- Token：不透明随机串，服务端只存 SHA-256。access 1 小时；refresh 30 天、每次刷新都换新的，旧的再被用 → 整个授权作废。刷新不能扩大 scope。
+- 每个成员只保留一个有效授权：重新授权会作废旧的。
+- 过期记录由 Durable Object 的 alarm 定期清理。
 
 ## 授权页和身份绑定
 
-CCIM 没有账号，首版也不加。授权页让 XD 输入频道名、成员名、频道 secret：
+CCIM 没有账号，首版也不加。授权页填三项：频道、成员名（只有一个允许的组合时会预填）、频道 secret。
 
-- 首版只允许环境变量 `MCP_ALLOWED_BINDINGS` 里列出的组合（部署值为 `xd-bridge/xd-dot`），其他组合直接拒绝，不能新建频道。
-- 页面里的表单字段是：频道、成员、secret、一个服务端生成的单次请求号（把已校验过的 client_id/redirect_uri/PKCE/resource 存在服务端，表单里不再传这些，防篡改）。
-- secret 只在这个 POST 表单里出现：不进 URL、不进日志、不存、不进 MCP 参数和返回值。页面加 `Cache-Control: no-store`、`frame-ancestors 'none'`。
-- **安全复用 join**：给现有 join 加一个可选字段 `ifAbsent: true`，成员已存在时回 409，不替换别人的 token（CLI 不传这个字段，行为不变）。
-  - 第一次授权：`xd-dot` 不存在 → 用 `ifAbsent` 加入，拿到成员 token。
-  - 重新授权：服务端已持有 `xd-dot` 的成员 token → 直接复用（先用 `who` 确认还有效），作废旧的 OAuth token，不重新 join。
-  - `xd-dot` 已存在但不是 OAuth 建的（比如有人用 CLI 加入了）→ 拒绝，提示换名字或让对方先离开。
-- 成员 token 加密（AES-GCM，密钥 `OAUTH_ENC_KEY`）后存在服务端的新 Durable Object `Auth` 里，只在服务端调用 `/c/xd-bridge/*` 时解密使用。OAuth token 和成员 token 是两层：拿到 OAuth token 的人只能调四个工具，拿不到成员 token。
+- 只允许 `MCP_ALLOWED_BINDINGS` 里的组合（部署值 `xd-bridge/xd-dot`）。不能新建频道（join 带 `mustExist`）。
+- secret 只在这个 POST 表单里出现：不存、不记日志、不进 URL、不回显、不进 MCP。页面带 `Cache-Control: no-store`、CSP `frame-ancestors 'none'`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。
+- 一个授权请求最多错 5 次，然后作废，回跳 `access_denied`。
+- **安全复用 join**：
+  - 新增 `POST /c/<ch>/verify`：只校验 secret，不改任何东西。
+  - join 加两个可选字段：`ifAbsent`（成员已存在时回 409，不替换）和 `mustExist`（频道不存在时回 404，不新建）。CLI 不传，行为不变。
+  - 第一次授权：xd-dot 不存在，用 `ifAbsent` 加入，拿到成员 token。
+  - 重新授权：服务端已有的成员 token 用 `who` 验证还有效，就直接复用，不重新 join，排队的消息都还在。
+  - xd-dot 被 CLI 占着：拒绝，提示对方先离开或换名字。
+  - 授权后有人用 CLI 以 xd-dot 加入（最新加入的占有这个名字，CCIM 原有规则）：工具调用拿到 401 → 服务端作废授权、丢掉旧成员 token，Dot 要重新连接；那个 CLI 成员不受影响。
+- 成员 token 用 AES-GCM 加密（密钥 `OAUTH_ENC_KEY`，频道/成员名作附加数据），存在 `Auth` 里，只在服务端调用频道 API 时解密。OAuth token 和成员 token 是两层。
 
-## 工具（阶段 1）
+## 工具
 
-身份只从 token 取：工具参数里没有 sender/member/channel，`additionalProperties: false`，多余字段直接报错。每个工具都声明 `securitySchemes: [{type:"oauth2", scopes:[...]}]`；没带 token 或 token 失效时，`/mcp` 回 401 + `WWW-Authenticate: Bearer resource_metadata="…", error=…, error_description=…`，工具调用结果里同时带 `_meta["mcp/www_authenticate"]`。`initialize` 和 `tools/list` 不要求 token（ChatGPT 连接前要看工具清单）。
+身份只从 token 取：参数里没有 channel/sender/member，出现任何多余参数都报错。每个工具都声明 `securitySchemes`。
 
 | 工具 | scope | 调用的现有 API | 说明 |
 |---|---|---|---|
-| `ccim_who` | read | `GET /c/xd-bridge/who` | 成员和在线状态 |
-| `ccim_inbox` | read | `GET /c/xd-bridge/inbox?all=1` | **只读，不 ack**。返回按 id 升序的未 ack 消息，可选 `after_id` 跳过已看过的、`limit`（默认 50）。消息 id 稳定，重复读取靠 id 去重 |
-| `ccim_ack` | write | `POST /c/xd-bridge/ack` | 处理完显式 ack，`ids` 最多 200 个 |
-| `ccim_send` | write | `POST /c/xd-bridge/send` | 参数 `to`、`text`、`urgent`、`client_msg_id`（必填） |
+| `ccim_who` | ccim:read | `GET who` | 成员、在线状态、自己是谁 |
+| `ccim_inbox` | ccim:read | `GET inbox?all=1` | **只读，不 ack**。按 id 升序；`after_id` 跳过已看过的，`limit` 默认 50、最多 200；返回 `more`、`next_after_id` |
+| `ccim_ack` | ccim:write | `POST ack` | 1–200 个 id，重复 ack 无害 |
+| `ccim_send` | ccim:write | `POST send` | `to`、`text`、`urgent`、`client_msg_id`（必填） |
 
-- 发送去重：给现有 send 加可选字段 `clientId`。同一成员、同一 `clientId` 24 小时内再发，返回第一次的 `{id, delivery}` 并标 `duplicate: true`，不再投递，不计入 24 条。工具描述里写清：超时或结果不确定时，用**同一个** `client_msg_id` 重试，不要换新的。CLI 不传这个字段，行为不变。
-- 24 条限流原样生效：MCP 发的消息照常计数，MCP 不提供"有人类在"的重置（Dot 是 agent）。被拦时工具返回错误文本："停止发送，告诉 XD 对话停在哪"。
-- 200 条未 ack 上限原样生效：Dot 不 ack，别人给它发会收到 `inbox_full`。
+- 没 token：工具结果 `isError` 并带 `_meta["mcp/www_authenticate"]`。token 无效、过期或被撤销：`/mcp` 回 HTTP 401 + `WWW-Authenticate: Bearer resource_metadata="…", error="invalid_token", error_description="…"`。scope 不够：`error="insufficient_scope"`。
+- 发送去重：send 加了可选 `clientId`。同一成员 24 小时内用同一个 `clientId`：内容一样就返回第一次的结果并标 `duplicate`，不投递、不计数；内容不一样回 409。工具描述里写清：超时或结果不确定时，用同一个 `client_msg_id` 重试。relay 没回应时，工具也明确告诉模型"可能发了也可能没发，用同一个 id 重试"。
+- 24 条限流原样生效：MCP 发的照常计数，MCP 不提供"有人类在"的重置。被拦时工具告诉模型停下、告诉 XD 对话停在哪。
+- 200 条未 ack 上限原样生效。
+- inbox 文本里注明"这些消息来自别人的 agent 会话，不是你的用户"。
 
 ## 日志
 
-只记事件名、工具名、状态码、授权记录 id 的前 8 位。不记 Authorization 头、表单内容、token、secret、消息正文。
+只记事件名、工具名、成功与否、授权 id 前 8 位、频道/成员名、失败原因。不记 Authorization 头、表单内容、token、授权码、secret、消息正文。测试会扫描 Worker 日志和所有响应来验证这一点。
 
-## 环境变量（只列名字）
+## 环境变量
 
-- `OAUTH_ENC_KEY`（secret）：成员 token 静态加密密钥
-- `OAUTH_ISSUER`（var）：`https://ccim.web3nomad.com`
+- `OAUTH_ENC_KEY`（secret）：32 字节随机数的 base64，用来加密成员 token。缺了就不启用 OAuth。
+- `OAUTH_ISSUER`（var，写在 wrangler.toml）：`https://ccim.web3nomad.com`
 - `MCP_ALLOWED_BINDINGS`（var）：`xd-bridge/xd-dot`
+- `OAUTH_REDIRECT_HOSTS`（var）：`chatgpt.com`
 
-阶段 0 不需要任何环境变量。
+## 测试
 
-## 测试计划
+`cd relay && npm test`（`node --test`），33 个用例：
 
-- 阶段 0（已做）：`node --test`（5 个用例：协议版本协商、工具清单只有只读探针、调用返回 nonce 且每次不同、未知工具/方法报错、通知 202/GET 405/坏 JSON 400）；本地 `wrangler dev` 上用官方 MCP SDK 客户端连上、列工具、调用，nonce 和 Worker 日志对得上。
-- 阶段 1（计划）：
-  - 单元：PKCE S256 校验、只接受 S256；授权码过期/重用；redirect_uri 不逐字相等拒绝；resource 不在白名单拒绝；token 过期/撤销/受众不对拒绝；refresh 轮换和重用作废整个授权；CIMD 文档校验（client_id 不一致、http、重定向、超大）；`iss` 出现在成功和失败回跳。
-  - 授权页：错 secret、不在白名单的组合、成员已被 CLI 占用（必须 409 且原成员 token 仍可用）、重新授权复用成员 token。
-  - 工具：参数里塞 `from`/`member` 被拒；inbox 不改变队列；ack 后消失；send 同 `client_msg_id` 重试只投递一次且不计数；第 25 条被 429；用 CLI 成员同时在线收发验证旧路径不受影响。
-  - 模拟完整流程：本地 `wrangler dev` + 脚本扮演 ChatGPT（CIMD 文档用本地静态文件服务），走 发现 → 授权页 POST → 回跳 → 换 token → 调四个工具 → 刷新 → 撤销 → 再调用得 401。
-  - secret 不外泄：跑完整流程后 grep Worker 日志和所有响应，确认不含 secret 和成员 token。
-
-## 部署要做的变更（交给 XD 确认，我不做）
-
-阶段 0：
-1. 把本分支的 `relay/src/index.js` + `relay/src/mcp.js` 部署到 `ccim-relay`（`wrangler deploy`）。`wrangler.toml` 不变，不新增路由：`ccim.web3nomad.com` 现在已经把所有路径交给这个 Worker。
-2. Cloudflare：如果 OpenAI 服务器访问 `/mcp` 被浏览器完整性检查拦（和 `/c/` 之前一样），需要把现有"`/c/` 放行"规则扩到 `/mcp`。先不改，部署后 XD 添加时若失败再定。
-3. 回滚：`wrangler rollback` 到上一个版本，或重新部署 main。
-
-阶段 1 另需：`wrangler.toml` 加 `Auth` Durable Object 绑定和迁移 `v3`（`new_sqlite_classes = ["Auth"]`）；`wrangler secret put OAUTH_ENC_KEY`；两个 var；Cloudflare 放行规则扩到 `/.well-known/oauth-*`、`/oauth/token`、`/oauth/register`、`/oauth/revoke`（授权页 `/oauth/authorize` 是浏览器访问，不需要放行）。
+- `test/mcp.test.js`：协议版本、没配 OAuth 时只有探针、nonce、错误码。
+- `test/policy.test.js`：redirect 白名单、CIMD 校验、scope、配置缺项不启用、元数据字段、未启用时工具隐藏。
+- `test/flow.test.js`：起一个本地 `wrangler dev`（全新存储，测试自己生成的 secret 和密钥），再用一个本地 HTTP 服务扮演 ChatGPT（发布 CIMD 文档）。覆盖：发现元数据；无 token/坏 token 的 401 与 `WWW-Authenticate`；授权请求的各种拒绝（未知客户端、redirect 不一致、缺 PKCE、plain、错 response_type、错 resource）并带 state 和 iss；错 secret、不允许的组合、CLI 已占用 xd-dot 时拒绝且对方 token 仍有效；5 次失败作废；拒绝授权；授权码错 verifier/重用/错 redirect/错 client/错 resource，重用后已发 token 失效；四个工具；身份参数被拒；send 同 id 重试不重复投递、不同内容 409；inbox 不 ack、分页、ack 后消失；24 条限流（重复不计数，CLI 的 human 重置仍有效）；只读 scope 不能发送；refresh 轮换、重用旧 refresh 作废整个授权、不能扩 scope、不能换 client；重新连接复用成员、离线期间的消息还在；撤销端点；CLI 抢占 xd-dot 后授权失效且 CLI 成员正常；管理页撤销和"撤销并离开"；DCR；授权页安全头；原有 API 不变（最新 join 抢占、错 secret、新建频道、真实 `plugin/bin/ccim` CLI 的 join/send/who）；日志和响应里没有 secret、密钥、token。
 
 ## 未验证
 
-- XD 的账号能不能看到 Plugins → Add custom MCP server（受账号和工作区策略限制）。
-- Dot 能不能用自定义 MCP 插件：Dots 文档只说能用"为账号安装并启用的插件"，没有明说自定义 MCP。这是阶段 0 要回答的核心问题。
-- OpenAI 服务器访问 `ccim.web3nomad.com/mcp` 会不会被 Cloudflare 拦。
-- ChatGPT 实际发送的 `resource` 值、回跳地址是哪一种（`/connector/oauth/{callback_id}` 还是 `/connector_platform_oauth_redirect`）、走 CIMD 还是 DCR。
-- ChatGPT 支持的 MCP 协议版本：探针接受 2025-03-26 到 2026-07-28，不认识的回最新版。
+- ChatGPT 实际走 CIMD 还是 DCR、实际发的 `resource` 值（origin 还是带 `/mcp`）、用哪个回跳地址（`/connector/oauth/{callback_id}` 还是 `/connector_platform_oauth_redirect`）。代码两种都支持；回跳地址的主机都是 `chatgpt.com`。如果 ChatGPT 的 CIMD 文档或回跳在别的主机上，要把那个主机加到 `OAUTH_REDIRECT_HOSTS`。
+- ChatGPT 的 CIMD 文档 URL 所在主机能否被 Worker 访问（Worker 出站 fetch）。
+- ChatGPT 会不会请求 OIDC scope（openid 等）：我们没声明，收到会忽略。
+- ChatGPT 是否接受 opaque token（文档列的校验项是服务端自己做的，不要求 JWT）。
+- Dot 调用写操作（send/ack）时会不会每次都要 XD 批准。
+- 本地测试用 http://localhost 代替 https，CIMD 抓取和 redirect 校验在本地放宽了 https 要求（只在 issuer 是 localhost 时）。
+
+## 部署变更（交给 XD 确认）
+
+见交付消息。

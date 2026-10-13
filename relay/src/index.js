@@ -1,5 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { handleMcp } from "./mcp.js";
+import { handleOAuth } from "./oauth.js";
+export { Auth } from "./oauth.js";
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const MAX_TEXT = 16 * 1024;
@@ -7,6 +9,9 @@ const MAX_QUEUE = 200;
 // Sends allowed in a channel since a human last typed in any joined session.
 // Stops two agents from chatting forever with nobody watching.
 const MAX_STREAK = 24;
+// A send carrying a clientId is answered from this record when retried within the window, instead of being delivered twice.
+const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
+const DEDUP_MS = 24 * 60 * 60 * 1000;
 
 // Close codes the CLI understands.
 const TAKEN_OVER = 4001; // another session joined with this handle
@@ -15,7 +20,9 @@ const DELETED = 4003; // someone holding the channel secret deleted the channel
 
 export default {
   async fetch(req, env) {
-    if (new URL(req.url).pathname === "/mcp") return handleMcp(req);
+    const path = new URL(req.url).pathname;
+    if (path === "/mcp") return handleMcp(req, env);
+    if (path.startsWith("/.well-known/oauth-") || path.startsWith("/oauth/")) return handleOAuth(req, env);
     const m = new URL(req.url).pathname.match(/^\/c\/([^/]+)\/([a-z]+)$/);
     if (!m) return json(404, { error: "not_found" });
     if (!NAME.test(m[1])) return json(400, { error: "bad_channel_name" });
@@ -29,6 +36,7 @@ export default {
 //   m:<handle>    -> { tokenHash, focus }
 //   tok:<hash>    -> handle
 //   q:<handle>:<id> -> message waiting for that handle
+//   cid:<handle>:<clientId>, cidt:<ts>:<handle>:<clientId> -> result of a send, for retries
 // Listeners are hibernating WebSockets tagged with their handle, so an idle channel costs nothing.
 export class Channel extends DurableObject {
   constructor(ctx, env) {
@@ -40,6 +48,7 @@ export class Channel extends DurableObject {
     const op = new URL(req.url).pathname.split("/")[3];
     if (op === "join" && req.method === "POST") return this.join(req);
     if (op === "delete" && req.method === "POST") return this.remove(req);
+    if (op === "verify" && req.method === "POST") return this.verify(req);
 
     const handle = await this.auth(req);
     if (!handle) return json(401, { error: "unauthorized" });
@@ -61,13 +70,16 @@ export class Channel extends DurableObject {
   }
 
   async join(req) {
-    const { handle } = await req.json().catch(() => ({}));
+    // ifAbsent: refuse instead of taking over an existing handle. mustExist: never create the channel.
+    // The CLI sends neither, so it keeps the newest-join-wins behaviour.
+    const { handle, ifAbsent, mustExist } = await req.json().catch(() => ({}));
     const secret = req.headers.get("x-ccim-secret") || "";
     if (!NAME.test(handle || "")) return json(400, { error: "bad_handle" });
 
     let channel = await this.ctx.storage.get("channel");
     const created = !channel;
     if (!channel) {
+      if (mustExist) return json(404, { error: "no_such_channel" });
       if (secret.length < 16) return json(400, { error: "secret_too_short" });
       channel = { secretHash: await sha256(secret), createdAt: Date.now() };
       await this.ctx.storage.put("channel", channel);
@@ -77,6 +89,7 @@ export class Channel extends DurableObject {
 
     // The newest join owns the handle: that is how a handle stays bound to exactly one session.
     const old = await this.ctx.storage.get(`m:${handle}`);
+    if (old && ifAbsent) return json(409, { error: "handle_taken" });
     if (old) {
       await this.ctx.storage.delete(`tok:${old.tokenHash}`);
       this.closeSockets(handle, TAKEN_OVER, "taken_over");
@@ -100,6 +113,14 @@ export class Channel extends DurableObject {
     return json(200, { ok: true });
   }
 
+  // Checks the secret without joining, creating or changing anything.
+  async verify(req) {
+    const channel = await this.ctx.storage.get("channel");
+    if (!channel) return json(404, { error: "no_such_channel" });
+    if ((await sha256(req.headers.get("x-ccim-secret") || "")) !== channel.secretHash) return json(403, { error: "wrong_secret" });
+    return json(200, { ok: true });
+  }
+
   async auth(req) {
     let token = (req.headers.get("authorization") || "").replace(/^Bearer /, "");
     // WebSocket clients cannot set headers, so the token rides in the subprotocol list.
@@ -117,9 +138,19 @@ export class Channel extends DurableObject {
     return new Response(null, { status: 101, webSocket: pair[0], headers: { "sec-websocket-protocol": "ccim" } });
   }
 
-  async send(from, { to, text, urgent }) {
+  async send(from, { to, text, urgent, clientId }) {
     if (typeof text !== "string" || !text.trim()) return json(400, { error: "empty_text" });
     if (text.length > MAX_TEXT) return json(413, { error: "text_too_long", max: MAX_TEXT });
+    let dedup;
+    if (clientId !== undefined) {
+      if (typeof clientId !== "string" || !CLIENT_ID.test(clientId)) return json(400, { error: "bad_client_id" });
+      dedup = { key: `cid:${from}:${clientId}`, hash: await sha256(JSON.stringify([to, text, !!urgent])) };
+      const prev = await this.ctx.storage.get(dedup.key);
+      if (prev && Date.now() - prev.ts < DEDUP_MS) {
+        if (prev.hash !== dedup.hash) return json(409, { error: "client_id_reused" });
+        return json(200, { ...prev.result, duplicate: true });
+      }
+    }
     const streak = (await this.ctx.storage.get("streak")) || 0;
     if (streak >= MAX_STREAK) return json(429, { error: "no_human_in_the_loop", max: MAX_STREAK });
 
@@ -146,8 +177,24 @@ export class Channel extends DurableObject {
         delivery[t] = "delivered";
       }
     }
-    await this.ctx.storage.put({ seq: id, streak: streak + 1 });
+    const updates = { seq: id, streak: streak + 1 };
+    if (dedup) {
+      const now = Date.now();
+      updates[dedup.key] = { ts: now, hash: dedup.hash, result: { id, delivery } };
+      updates[`cidt:${tsKey(now)}:${from}:${clientId}`] = dedup.key;
+      await this.sweepClientIds(now);
+    }
+    await this.ctx.storage.put(updates);
     return json(200, { id, delivery });
+  }
+
+  // Drops send records older than the retry window, a few at a time, as sends happen.
+  async sweepClientIds(now) {
+    const expired = await this.ctx.storage.list({ prefix: "cidt:", end: `cidt:${tsKey(now - DEDUP_MS)}`, limit: 32 });
+    if (!expired.size) return;
+    const records = await this.ctx.storage.get([...expired.values()]);
+    const stale = [...records].filter(([, r]) => now - r.ts >= DEDUP_MS).map(([k]) => k);
+    await this.ctx.storage.delete([...expired.keys(), ...stale]);
   }
 
   async focus(handle, on) {
@@ -208,6 +255,7 @@ export class Channel extends DurableObject {
 }
 
 const pad = (id) => String(id).padStart(12, "0");
+const tsKey = (ts) => String(ts).padStart(15, "0");
 const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 const sha256 = async (s) => hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))));
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });

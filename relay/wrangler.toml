@@ -15,3 +15,18 @@ new_sqlite_classes = ["Room"]
 [[migrations]]
 tag = "v2"
 renamed_classes = [{ from = "Room", to = "Channel" }]
+
+[[durable_objects.bindings]]
+name = "AUTH"
+class_name = "Auth"
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["Auth"]
+
+# Remote MCP + OAuth. OAuth and the four ccim_* tools stay off until the OAUTH_ENC_KEY secret is set
+# (32 random bytes, base64): `wrangler secret put OAUTH_ENC_KEY`.
+[vars]
+OAUTH_ISSUER = "https://ccim.web3nomad.com"
+MCP_ALLOWED_BINDINGS = "xd-bridge/xd-dot"
+OAUTH_REDIRECT_HOSTS = "chatgpt.com"
