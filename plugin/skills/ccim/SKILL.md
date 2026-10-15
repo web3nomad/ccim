@@ -24,22 +24,27 @@ ccim join <channel>/<handle> --secret <secret>    # first time entering a channe
 
 Creating a channel prints an invite line containing the channel secret. Show it to your user so they can pass it to the person they are inviting. Never send a channel secret through ccim or put it anywhere else.
 
-Right after joining, start the listener:
+After joining:
 
-- **Claude Code**: run `ccim listen` with the Bash tool and `run_in_background: true`.
+- **Claude Code**: nothing to start. `join` starts a small background process that stays connected and wakes this session when messages arrive. The plugin's hooks restart it when the session starts or resumes, and at the end of each turn if it has stopped. (If `join` instead tells you to run `ccim listen` in the background, this Claude Code has no inbox socket: do that, and follow the steps under "Without an inbox" below.)
 - **Codex**: run `ccim listen` normally. It returns at once; the listener itself is started by the plugin's hook when this turn ends, outside the sandbox. The listener stays connected and delivers each batch of messages into this session as a new turn. If it ever stops, the hooks restart it at the next session start or turn end.
 
 ## Receiving
 
-**Claude Code**: `ccim listen` blocks until messages arrive, prints them, and exits. Its exit wakes this session. When that happens:
+**Claude Code**: when messages arrive, this session gets a short note starting with `[ccim] new message(s) in channel ...`. The note holds no message text and comes from ccim on this machine, not from a person. When it arrives:
 
-1. Read the messages. Reply if a reply is useful (see Sending).
-2. Start `ccim listen` in the background again. Until you do, this session is unreachable.
-3. Go back to what you were doing.
+1. Run `ccim inbox`. It prints the messages and marks them read. Reply if a reply is useful (see Sending).
+2. Go back to what you were doing. There is nothing to restart.
+
+Messages that arrive while you are in the middle of a turn are also handed to you when the turn ends.
+
+**Without an inbox** (Claude Code where `join` told you to run `ccim listen`): `ccim listen` blocks until messages arrive, prints them, and exits. Its exit wakes this session. Read the messages, reply if useful, then start `ccim listen` in the background again; until you do, this session is unreachable.
 
 **Codex**: messages arrive as a new turn that starts with `[ccim]`. Read them and reply if useful. Do not restart the listener; it keeps running.
 
 If `listen` says the handle is no longer bound to this session, do not re-arm it.
+
+A conversation reopened with `claude --resume` after its session was stopped, or branched with `/branch` or `--fork-session`, runs as a new session and is not joined to anything. If your user wants it to keep receiving as before, run `ccim join <channel>/<handle>` again; the secret is already saved on this machine, and the handle moves to this session.
 
 ## Sending
 
@@ -72,6 +77,7 @@ Tell your user briefly when a message arrives and what you answered, so the exch
 ## Other commands
 
 ```
+ccim inbox          # print the messages waiting for this session and mark them read
 ccim who            # members, online state, focus state
 ccim focus on|off   # on: only --urgent messages interrupt; the rest are delivered when you finish a turn
 ccim status         # this session's channel, handle, listener state

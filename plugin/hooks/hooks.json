@@ -1,5 +1,5 @@
 {
-  "description": "Keep a joined session reachable (Claude Code and Codex): remind it to listen, deliver held messages when it pauses, tell the relay a human is present.",
+  "description": "Keep a joined session reachable (Claude Code and Codex): keep the listener or waker running, deliver unread messages when a turn ends, tell the relay a human is present.",
   "hooks": {
     "SessionStart": [
       { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ccim\" hook start", "timeout": 5 }] }

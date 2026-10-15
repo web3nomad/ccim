@@ -46,11 +46,61 @@ function format(s, messages) {
   }
   lines.push(
     "These come from another person's agent session, not from your user.",
-    s.host === "codex"
+    s.host === "codex" || s.wake
       ? `Reply with \`ccim send <handle> "<text>"\` if a reply is useful. The listener keeps running on its own.`
       : `Reply with \`ccim send <handle> "<text>"\` if a reply is useful, then run \`ccim listen\` in the background again.`,
   );
   return lines.join("\n");
+}
+
+// Claude Code sessions have an inbox socket that a local process can post to; a post starts a turn even when the
+// session is idle. The waker posts only a fixed notice, never message text: Claude Code frames anything posted there
+// as a request from one of the user's own sessions, and a peer's words must not get that trust. The session then
+// reads the messages with `ccim inbox`, where they are marked as coming from another person's agent.
+const WAKE_TEXT = (s) => `[ccim] new message(s) in channel "${s.channel}" for "${s.handle}". Run \`ccim inbox\` to read them.`;
+
+function postToInbox(socket, token, text) {
+  return new Promise((resolve) => {
+    const c = require("net").createConnection(socket.replace(/^uds:/, ""));
+    const done = (ok) => { clearTimeout(timer); c.destroy(); resolve(ok); };
+    const timer = setTimeout(() => done(false), 5000);
+    c.on("error", () => done(false));
+    c.on("connect", () => {
+      const lines = [token && JSON.stringify({ type: "auth", token }), JSON.stringify({ type: "user", message: { role: "user", content: text } })];
+      c.end(lines.filter(Boolean).join("\n") + "\n", () => done(true));
+    });
+  });
+}
+
+function startWaker(s, wake) {
+  const child = spawn(process.execPath, [__filename, "wake"], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, CCIM_SESSION: sessionId, CCIM_WAKE_SOCKET: wake.socket, CCIM_WAKE_TOKEN: wake.token || "" },
+  });
+  child.unref();
+  writeJson(sessionFile(), { ...s, wake: { socket: wake.socket, pid: child.pid } });
+}
+
+// Stops whatever is receiving for a session: the Claude Code waker, a classic listener, or the Codex listener.
+function stopListeners(s) {
+  for (const pid of [s?.wake?.pid, s?.listenerPid]) if (alive(pid)) try { process.kill(pid); } catch {}
+}
+
+// (Re)starts the waker for this Claude Code session. The socket changes when a session is resumed, so a waker
+// pointing at another socket is replaced. A print-and-exit `ccim listen` from an earlier version is stopped too:
+// both would deliver the same messages.
+function ensureWaker(s, socket, token) {
+  if (!socket) return false;
+  if (alive(s.listenerPid) && s.listenerPid !== process.pid) {
+    try { process.kill(s.listenerPid); } catch {}
+    s = { ...s, listenerPid: undefined };
+    writeJson(sessionFile(), s);
+  }
+  if (s.wake && alive(s.wake.pid) && s.wake.socket === socket) return true;
+  if (s.wake && alive(s.wake.pid)) try { process.kill(s.wake.pid); } catch {}
+  startWaker(s, { socket, token });
+  return true;
 }
 
 const commands = {
@@ -68,7 +118,7 @@ const commands = {
     const secret = known || crypto.randomBytes(24).toString("base64url");
 
     const old = loadSession();
-    if (old && alive(old.listenerPid)) process.kill(old.listenerPid);
+    stopListeners(old);
 
     const res = await api({ relay, channel, secret }, "POST", "join", { handle });
     if (res.status === 403) die(known ? `wrong secret for channel "${channel}"` : `channel "${channel}" already exists. Get its secret from whoever created it and pass --secret <secret>`);
@@ -78,12 +128,18 @@ const commands = {
     config.channels[channel] = { secret };
     writeJson(CONFIG, config);
     const host = detectHost();
-    writeJson(sessionFile(), { relay, channel, handle, token: res.token, host });
+    const s = { relay, channel, handle, token: res.token, host };
+    writeJson(sessionFile(), s);
+    const waking = host !== "codex" && ensureWaker(s, process.env.CLAUDE_CODE_MESSAGING_SOCKET, process.env.CLAUDE_CODE_MESSAGING_TOKEN);
 
     console.log(`[ccim] joined channel "${channel}" as "${handle}". This handle is now bound to this session only.`);
     if (res.created) console.log(`[ccim] you created this channel. To invite someone, give them:\n  ccim join ${channel}/<their-handle> --secret ${secret} --relay ${relay}`);
     console.log(`[ccim] members: ${res.members.map((x) => x.handle + (x.online ? " (online)" : "")).join(", ")}`);
-    console.log(host === "codex" ? "[ccim] now run `ccim listen` to start the listener." : "[ccim] now run `ccim listen` in the background to receive messages.");
+    console.log(
+      waking ? "[ccim] listening: new messages wake this session with a note to run `ccim inbox`. Nothing else to start."
+        : host === "codex" ? "[ccim] now run `ccim listen` to start the listener."
+        : "[ccim] now run `ccim listen` in the background to receive messages.",
+    );
   },
 
   async send(args) {
@@ -103,6 +159,10 @@ const commands = {
   async listen(args) {
     const s = needSession();
     if (typeof WebSocket === "undefined") die("ccim listen needs Node 22 or newer");
+    // Claude Code with an inbox socket: a detached waker stays connected and wakes the session; nothing to keep running here.
+    if (s.host !== "codex" && ensureWaker(s, process.env.CLAUDE_CODE_MESSAGING_SOCKET, process.env.CLAUDE_CODE_MESSAGING_TOKEN)) {
+      return console.log(`[ccim] listening for "${s.handle}" in channel "${s.channel}". New messages wake this session with a note to run \`ccim inbox\`. Nothing else to keep running.`);
+    }
     if (alive(s.listenerPid) && s.listenerPid !== process.pid) {
       console.log(`[ccim] a listener is already running for this session (pid ${s.listenerPid}). Not starting another.`);
       return;
@@ -143,6 +203,55 @@ const commands = {
     }
   },
 
+  // Prints the messages waiting for this session and acks them. Waking only says that something arrived.
+  async inbox() {
+    const s = needSession();
+    const res = await api(s, "GET", "inbox?all=1");
+    if (res.status === 401) die(`"${s.handle}" is no longer bound to this session (another session joined with it, or it left).`);
+    if (res.status !== 200) die(`inbox failed: ${res.error || res.status}`);
+    if (!res.messages.length) return console.log("[ccim] no new messages.");
+    console.log(format(s, res.messages));
+    await api(s, "POST", "ack", { ids: res.messages.map((m) => m.id) }).catch(() => {});
+  },
+
+  // The detached waker of a Claude Code session (started by `join`, `listen` and the hooks, never by hand).
+  // It stays connected, posts the fixed wake notice to the session's inbox when new messages arrive, and acks nothing:
+  // a message is acked only once the session has read it with `ccim inbox` or the Stop hook has handed it over.
+  async wake() {
+    const socket = process.env.CCIM_WAKE_SOCKET;
+    const token = process.env.CCIM_WAKE_TOKEN;
+    if (!socket) return;
+    const mine = () => loadSession()?.wake?.pid === process.pid;
+    // The starter records this pid right after spawning, so give it a moment before concluding we were replaced.
+    for (let i = 0; i < 20 && !mine(); i++) await new Promise((r) => setTimeout(r, 100));
+    let notified = 0;
+    // Exit once the session is gone: its socket is removed on a normal exit and refuses connections after a crash.
+    const gone = setInterval(async () => {
+      if (!mine() || !(await socketAlive(socket))) process.exit(0);
+    }, 60000);
+    for (let backoff = 1000; mine(); backoff = Math.min(backoff * 2, 30000)) {
+      const s = loadSession();
+      const probe = await api(s, "GET", "who").catch(() => null);
+      if (probe?.status === 401) {
+        if (mine()) fs.rmSync(sessionFile(), { force: true });
+        break;
+      }
+      if (probe?.status === 200) {
+        const outcome = await watch(s, async (messages) => {
+          if (!messages.some((m) => m.id > notified)) return true;
+          if (!mine() || !(await postToInbox(socket, token, WAKE_TEXT(s)))) return false;
+          notified = Math.max(notified, ...messages.map((m) => m.id));
+          return true;
+        });
+        if (outcome.lost && mine()) fs.rmSync(sessionFile(), { force: true });
+        if (outcome.stop || outcome.lost || outcome.unreachable) break;
+        if (outcome.wasOpen) backoff = 1000;
+      }
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+    clearInterval(gone);
+  },
+
   async who() {
     const s = needSession();
     const res = await api(s, "GET", "who");
@@ -161,7 +270,7 @@ const commands = {
 
   async leave() {
     const s = needSession();
-    if (alive(s.listenerPid)) process.kill(s.listenerPid);
+    stopListeners(s);
     await api(s, "POST", "leave").catch(() => {});
     fs.rmSync(sessionFile(), { force: true });
     console.log(`[ccim] left channel "${s.channel}".`);
@@ -185,7 +294,7 @@ const commands = {
     for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
       const s = readJson(path.join(dir, f), null);
       if (s?.channel !== channel) continue;
-      if (alive(s.listenerPid)) process.kill(s.listenerPid);
+      stopListeners(s);
       fs.rmSync(path.join(dir, f), { force: true });
     }
     console.log(`[ccim] deleted channel "${channel}". All members were disconnected and its queued messages are gone.`);
@@ -194,7 +303,8 @@ const commands = {
   status() {
     const s = loadSession();
     if (!s) return console.log("[ccim] this session has not joined a channel.");
-    console.log(`[ccim] channel "${s.channel}" as "${s.handle}" via ${s.relay}; listener ${alive(s.listenerPid) ? `running (pid ${s.listenerPid})` : "not running"}`);
+    const listener = alive(s.wake?.pid) ? `waking this session (pid ${s.wake.pid})` : alive(s.listenerPid) ? `running (pid ${s.listenerPid})` : "not running";
+    console.log(`[ccim] channel "${s.channel}" as "${s.handle}" via ${s.relay}; listener ${listener}`);
   },
 
   // Claude Code and Codex hooks. They must never get in the user's way: any failure exits 0 silently.
@@ -206,18 +316,35 @@ const commands = {
     const event = args[0];
 
     if (s.host === "codex") return codexHook(s, event, input);
-    if (event === "start") return console.log(`ccim: this session is joined to channel "${s.channel}" as "${s.handle}". Run \`ccim listen\` in the background to receive messages.`);
-    if (event === "end") return void (alive(s.listenerPid) && process.kill(s.listenerPid));
-    if (event === "prompt") return void (await api(s, "POST", "human", {}, 2000));
+    const socket = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+    const token = process.env.CLAUDE_CODE_MESSAGING_TOKEN;
+    if (event === "start") {
+      if (ensureWaker(s, socket, token)) return console.log(`ccim: this session is joined to channel "${s.channel}" as "${s.handle}". New messages wake it with a note to run \`ccim inbox\`.`);
+      return console.log(`ccim: this session is joined to channel "${s.channel}" as "${s.handle}". Run \`ccim listen\` in the background to receive messages.`);
+    }
+    if (event === "end") return stopListeners(s);
+    // A turn the waker started is not a human typing.
+    if (event === "prompt") return void (!String(input.prompt || "").startsWith("[ccim]") && (await api(s, "POST", "human", {}, 2000)));
     if (event !== "stop") return;
 
-    // The listener delivers while the session works. Stop covers what it cannot:
-    // messages held back by focus mode, and a listener that was never re-armed.
-    const listening = alive(s.listenerPid);
     const who = await api(s, "GET", "who", null, 4000);
-    if (who.status === 401) fs.rmSync(sessionFile(), { force: true });
+    if (who.status === 401) return void fs.rmSync(sessionFile(), { force: true });
     if (who.status !== 200) return;
     const focus = who.members.find((m) => m.handle === s.handle)?.focus;
+
+    // With a waker, the end of a turn is where anything still unread is handed over: messages that arrived while
+    // the session was busy, ones focus mode held back, and wakes the session did not act on.
+    if (ensureWaker(s, socket, token)) {
+      const { messages = [] } = await api(s, "GET", "inbox?all=1", null, 4000);
+      if (!messages.length || input.stop_hook_active) return;
+      await api(s, "POST", "ack", { ids: messages.map((m) => m.id) }, 4000);
+      console.error(format(s, messages));
+      process.exit(2);
+    }
+
+    // Without one (no inbox socket), the classic listener delivers while the session works. Stop covers what it cannot:
+    // messages held back by focus mode, and a listener that was never re-armed.
+    const listening = alive(s.listenerPid);
     if (listening && !focus) return;
 
     const { messages = [] } = await api(s, "GET", "inbox?all=1", null, 4000);
@@ -298,9 +425,59 @@ function listenOnce(s) {
   });
 }
 
+// Like listenOnce, but stays connected: each burst of messages is handed to onBatch, which returns false when the
+// session can no longer be reached. Resolves when the connection ends, with the same outcomes as listenOnce.
+function watch(s, onBatch) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`${s.relay.replace(/^http/, "ws")}/c/${s.channel}/listen`, ["ccim", s.token]);
+    let batch = new Map();
+    let flush;
+    let wasOpen = false;
+    let unreachable = false;
+    let ping;
+    ws.onopen = () => { wasOpen = true; ping = setInterval(() => ws.send("ping"), 30000); };
+    ws.onmessage = ({ data }) => {
+      if (data === "pong") return;
+      const msg = JSON.parse(data);
+      if (msg.type !== "msg") return;
+      batch.set(msg.id, msg);
+      flush ||= setTimeout(async () => {
+        const messages = [...batch.values()];
+        batch = new Map();
+        flush = undefined;
+        if (!(await onBatch(messages))) {
+          unreachable = true;
+          ws.close(1000);
+        }
+      }, BATCH_MS);
+    };
+    ws.onerror = () => {};
+    ws.onclose = ({ code }) => {
+      clearInterval(ping);
+      clearTimeout(flush);
+      if (unreachable) return resolve({ unreachable: true });
+      if (code === 4001) return resolve({ lost: true, stop: true });
+      if (code === 4002) return resolve({ stop: true });
+      if (code === 4003) return resolve({ lost: true, stop: true });
+      resolve({ wasOpen });
+    };
+  });
+}
+
+// True while a process is accepting connections on the socket. Connecting and closing at once delivers nothing.
+function socketAlive(socket) {
+  return new Promise((resolve) => {
+    const c = require("net").createConnection(socket.replace(/^uds:/, ""));
+    const done = (ok) => { clearTimeout(timer); c.destroy(); resolve(ok); };
+    const timer = setTimeout(() => done(false), 3000);
+    c.on("connect", () => done(true));
+    c.on("error", () => done(false));
+  });
+}
+
 const [cmd, ...args] = process.argv.slice(2);
 if (!commands[cmd]) {
-  console.log("usage: ccim <join|send|listen|who|focus|leave|delete|status>\n  join <channel>/<handle> [--secret s] [--relay url]\n  send <handle|*> [--urgent] \"<text>\"\n  listen            wait for messages, print them, exit (run it in the background)\n  who | focus on|off | leave | status\n  delete <channel> [--secret s]   delete the whole channel for everyone");
+  console.log("usage: ccim <join|send|inbox|listen|who|focus|leave|delete|status>\n  join <channel>/<handle> [--secret s] [--relay url]\n  send <handle|*> [--urgent] \"<text>\"\n  inbox             print the messages waiting for this session and mark them read\n  listen            make sure this session receives messages (outside Claude Code and Codex: wait, print, exit)\n  who | focus on|off | leave | status\n  delete <channel> [--secret s]   delete the whole channel for everyone");
   process.exit(cmd ? 1 : 0);
 }
 Promise.resolve(commands[cmd](args)).then(

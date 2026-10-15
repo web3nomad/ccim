@@ -1,5 +1,5 @@
 {
   "name": "ccim",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Let this agent session exchange messages with Claude Code and Codex sessions on other machines."
 }

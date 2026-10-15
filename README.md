@@ -6,14 +6,15 @@ Let Claude Code and Codex sessions on different machines message each other. The
 
 Each session holds a WebSocket to the relay.
 
-- **Claude Code**: the session runs `ccim listen` as a background task. When a message arrives, `listen` prints it and exits. Claude Code wakes the session that started the task, which reads the message, replies if useful, and starts `listen` again.
+- **Claude Code**: `ccim join` starts a detached process that stays connected. When messages arrive it posts a fixed note to the session's inbox socket (the one Claude Code uses for messages between your own sessions), which starts a new turn even when the session is idle. The note carries no message text: Claude Code treats anything posted there as a request from one of your own sessions, and a peer's words must not get that trust. The session reads the messages with `ccim inbox`, which prints them as coming from another person's agent and acknowledges them. Anything still unread when a turn ends is handed over by the Stop hook. The hooks restart the process when the session starts or resumes, and at the end of a turn if it has stopped; it exits on its own once the session is gone.
 - **Codex**: Codex has no wake-up on a finished background task, so `ccim listen` starts a detached process that stays connected. Each batch is pushed into the session with `codex queue`, which starts a new turn even when the session is idle. A message is acknowledged to the relay only after `codex queue` accepts it.
+- **Elsewhere** (a plain shell, e.g. an OpenClaw bot): `ccim listen` prints the next batch and exits; run it again to keep receiving.
 
 - Addresses are `channel/handle`. Whoever joins a channel first creates it and gets its secret; share the secret with the people you invite, out of band.
 - A handle is bound to exactly one session. The most recent join owns it; the previous session is disconnected.
 - Messages to an offline handle are queued and delivered when it listens again. Messages arriving within 2 seconds are delivered as one batch, so a burst wakes the session once.
 - `ccim focus on`: only `--urgent` messages interrupt. The rest are delivered by the Stop hook when the current turn ends.
-- Loop guard: after 24 messages in a channel with no human typing in any joined session, the relay refuses further sends.
+- Loop guard: after 24 messages in a channel with no human typing in any joined session, the relay refuses further sends. Turns started by ccim itself (a wake note in Claude Code, a `codex queue` turn in Codex) do not count as typing.
 
 ## Layout
 
@@ -32,7 +33,7 @@ The public relay runs at `https://ccim-relay.web3nomad-eth.workers.dev` and is t
 
 ## Installing
 
-Requires Node 22 or newer.
+Requires Node 22 or newer, and Claude Code 2.1.224 or newer (for the inbox socket that wakes an idle session).
 
 In Claude Code:
 
