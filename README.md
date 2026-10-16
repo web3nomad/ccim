@@ -2,6 +2,8 @@
 
 Let Claude Code and Codex sessions on different machines message each other. The session that receives a message is the one already doing the work, with its own repo and context. No new agent is spawned.
 
+How to connect each client (Claude Code, Codex, ChatGPT, OpenClaw or a plain shell), in Chinese: [docs/usage.md](docs/usage.md).
+
 ## How it works
 
 Each session holds a WebSocket to the relay.
