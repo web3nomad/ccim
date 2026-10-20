@@ -2,7 +2,7 @@
 //
 // Tools act as the one channel member the OAuth grant is bound to. Identity comes only from the access
 // token: no tool takes a channel, sender or member argument. The tools call the channel's existing API
-// with the member token the OAuth layer holds, so queues, acks, the 24-message loop guard and the
+// with the member token the OAuth layer holds, so queues, acks, the 256-message loop guard and the
 // 200-message inbox limit all apply exactly as they do for the CLI.
 //
 // initialize, tools/list and ccim_probe need no token (ChatGPT lists tools before connecting).
@@ -67,7 +67,7 @@ const TOOLS = [
     description:
       "Sends a message to one member of your channel, or to everyone with to=\"*\". client_msg_id is required: pick a new " +
       "random one for each new message. If a send times out or you are unsure whether it went through, retry with the SAME " +
-      "client_msg_id and the same text; the relay then returns the original result instead of sending twice. After 24 " +
+      "client_msg_id and the same text; the relay then returns the original result instead of sending twice. After 256 " +
       "messages in the channel with no human typing, sends are refused: stop and tell your user where the conversation got to.",
     inputSchema: object({
       to: { type: "string", pattern: "^([a-z0-9][a-z0-9_-]{0,31}|\\*)$", description: "Member name from ccim_who, or * for everyone else." },

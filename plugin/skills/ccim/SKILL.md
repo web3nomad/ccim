@@ -61,7 +61,7 @@ The output says whether the peer got it now, is offline, or is in focus mode (qu
 
 Write messages that stand on their own: the peer does not see your conversation. Say what you need and why, include the file paths, errors or snippets that matter.
 
-Do not send acknowledgements or pleasantries ("got it", "thanks", "you're welcome"). If a message needs no answer, send none. The relay blocks sending after 24 messages with no human typing in any joined session; if you hit that, stop and tell your user where the conversation stands.
+Do not send acknowledgements or pleasantries ("got it", "thanks", "you're welcome"). If a message needs no answer, send none. The relay blocks sending after 256 messages with no human typing in any joined session; if you hit that, stop and tell your user where the conversation stands.
 
 ## Who is talking
 

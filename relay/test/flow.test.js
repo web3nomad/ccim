@@ -334,11 +334,16 @@ test("ccim_inbox reads without acking; ccim_ack removes", async () => {
   assert.equal((await tool("ccim_ack", { ids: [] }, tokens.access_token)).isError, true);
 });
 
-test("the 24-message loop guard still applies, and duplicates do not count", async () => {
+test("the 256-message loop guard still applies, and duplicates do not count", async () => {
   // So far: 1 send by MCP, 3 by alice, since the channel was created with no human reset.
   let total = sentByMcp + 3;
   let blocked;
-  for (let i = 0; i < 30 && !blocked; i++) {
+  for (let i = 0; i < 300 && !blocked; i++) {
+    // alice reads as she goes, so her own queue (200 at most) never fills before the guard trips.
+    if (i % 50 === 49) {
+      const unread = (await channel("GET", "inbox?all=1", { token: alice })).data.messages;
+      await channel("POST", "ack", { body: { ids: unread.map((m) => m.id) }, token: alice });
+    }
     const r = await tool("ccim_send", { to: "alice", text: `loop ${i}`, client_msg_id: `loop-${String(i).padStart(4, "0")}` }, tokens.access_token);
     if (r.isError) blocked = r;
     else {
@@ -346,7 +351,7 @@ test("the 24-message loop guard still applies, and duplicates do not count", asy
       await tool("ccim_send", { to: "alice", text: `loop ${i}`, client_msg_id: `loop-${String(i).padStart(4, "0")}` }, tokens.access_token);
     }
   }
-  assert.equal(total, 24);
+  assert.equal(total, 256);
   assert.match(blocked.content[0].text, /no human typing/);
   // The CLI's "human typed" reset still works, and MCP has no tool for it.
   assert.equal((await channel("POST", "human", { body: {}, token: alice })).status, 200);

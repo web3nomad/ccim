@@ -8,7 +8,7 @@ const MAX_TEXT = 16 * 1024;
 const MAX_QUEUE = 200;
 // Sends allowed in a channel since a human last typed in any joined session.
 // Stops two agents from chatting forever with nobody watching.
-const MAX_STREAK = 24;
+const MAX_STREAK = 256;
 // A send carrying a clientId is answered from this record when retried within the window, instead of being delivered twice.
 const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
 const DEDUP_MS = 24 * 60 * 60 * 1000;

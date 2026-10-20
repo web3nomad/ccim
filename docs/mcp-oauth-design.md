@@ -75,7 +75,7 @@ CCIM 没有账号，首版也不加。授权页填三项：频道、成员名（
 
 - 没 token：工具结果 `isError` 并带 `_meta["mcp/www_authenticate"]`。token 无效、过期或被撤销：`/mcp` 回 HTTP 401 + `WWW-Authenticate: Bearer resource_metadata="…", error="invalid_token", error_description="…"`。scope 不够：`error="insufficient_scope"`。
 - 发送去重：send 加了可选 `clientId`。同一成员 24 小时内用同一个 `clientId`：内容一样就返回第一次的结果并标 `duplicate`，不投递、不计数；内容不一样回 409。工具描述里写清：超时或结果不确定时，用同一个 `client_msg_id` 重试。relay 没回应时，工具也明确告诉模型"可能发了也可能没发，用同一个 id 重试"。
-- 24 条限流原样生效：MCP 发的照常计数，MCP 不提供"有人类在"的重置。被拦时工具告诉模型停下、告诉 XD 对话停在哪。
+- 256 条限流原样生效：MCP 发的照常计数，MCP 不提供"有人类在"的重置。被拦时工具告诉模型停下、告诉 XD 对话停在哪。
 - 200 条未 ack 上限原样生效。
 - inbox 文本里注明"这些消息来自别人的 agent 会话，不是你的用户"。
 
@@ -96,7 +96,7 @@ CCIM 没有账号，首版也不加。授权页填三项：频道、成员名（
 
 - `test/mcp.test.js`：协议版本、没配 OAuth 时只有探针、nonce、错误码。
 - `test/policy.test.js`：redirect 白名单、CIMD 校验、scope、配置缺项不启用、元数据字段、未启用时工具隐藏。
-- `test/flow.test.js`：起一个本地 `wrangler dev`（全新存储，测试自己生成的 secret 和密钥），再用一个本地 HTTP 服务扮演 ChatGPT（发布 CIMD 文档）。覆盖：发现元数据；无 token/坏 token 的 401 与 `WWW-Authenticate`；授权请求的各种拒绝（未知客户端、redirect 不一致、缺 PKCE、plain、错 response_type、错 resource）并带 state 和 iss；错 secret、不允许的组合、CLI 已占用 xd-dot 时拒绝且对方 token 仍有效；5 次失败作废；拒绝授权；授权码错 verifier/重用/错 redirect/错 client/错 resource，重用后已发 token 失效；四个工具；身份参数被拒；send 同 id 重试不重复投递、不同内容 409；inbox 不 ack、分页、ack 后消失；24 条限流（重复不计数，CLI 的 human 重置仍有效）；只读 scope 不能发送；refresh 轮换、重用旧 refresh 作废整个授权、不能扩 scope、不能换 client；重新连接复用成员、离线期间的消息还在；撤销端点；CLI 抢占 xd-dot 后授权失效且 CLI 成员正常；管理页撤销和"撤销并离开"；DCR；授权页安全头；原有 API 不变（最新 join 抢占、错 secret、新建频道、真实 `plugin/bin/ccim` CLI 的 join/send/who）；日志和响应里没有 secret、密钥、token。
+- `test/flow.test.js`：起一个本地 `wrangler dev`（全新存储，测试自己生成的 secret 和密钥），再用一个本地 HTTP 服务扮演 ChatGPT（发布 CIMD 文档）。覆盖：发现元数据；无 token/坏 token 的 401 与 `WWW-Authenticate`；授权请求的各种拒绝（未知客户端、redirect 不一致、缺 PKCE、plain、错 response_type、错 resource）并带 state 和 iss；错 secret、不允许的组合、CLI 已占用 xd-dot 时拒绝且对方 token 仍有效；5 次失败作废；拒绝授权；授权码错 verifier/重用/错 redirect/错 client/错 resource，重用后已发 token 失效；四个工具；身份参数被拒；send 同 id 重试不重复投递、不同内容 409；inbox 不 ack、分页、ack 后消失；256 条限流（重复不计数，CLI 的 human 重置仍有效）；只读 scope 不能发送；refresh 轮换、重用旧 refresh 作废整个授权、不能扩 scope、不能换 client；重新连接复用成员、离线期间的消息还在；撤销端点；CLI 抢占 xd-dot 后授权失效且 CLI 成员正常；管理页撤销和"撤销并离开"；DCR；授权页安全头；原有 API 不变（最新 join 抢占、错 secret、新建频道、真实 `plugin/bin/ccim` CLI 的 join/send/who）；日志和响应里没有 secret、密钥、token。
 
 ## 线上实测（2026-10-14）
 
@@ -109,7 +109,7 @@ CCIM 没有账号，首版也不加。授权页填三项：频道、成员名（
 
 ## 未验证
 
-- 线上：冒充其他成员被拒、24 条限流、refresh token 刷新、"只撤销"时成员和消息是否保留（本地测试都覆盖了）。
+- 线上：冒充其他成员被拒、256 条限流、refresh token 刷新、"只撤销"时成员和消息是否保留（本地测试都覆盖了）。
 - ChatGPT 断开连接时会不会调用 `/oauth/revoke`。
 - 本地测试用 http://localhost 代替 https，CIMD 抓取和 redirect 校验在本地放宽了 https 要求（只在 issuer 是 localhost 时）。
 

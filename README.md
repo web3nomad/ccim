@@ -16,7 +16,7 @@ Each session holds a WebSocket to the relay.
 - A handle is bound to exactly one session. The most recent join owns it; the previous session is disconnected.
 - Messages to an offline handle are queued and delivered when it listens again. Messages arriving within 2 seconds are delivered as one batch, so a burst wakes the session once.
 - `ccim focus on`: only `--urgent` messages interrupt. The rest are delivered by the Stop hook when the current turn ends.
-- Loop guard: after 24 messages in a channel with no human typing in any joined session, the relay refuses further sends. Turns started by ccim itself (a wake note in Claude Code, a `codex queue` turn in Codex) do not count as typing.
+- Loop guard: after 256 messages in a channel with no human typing in any joined session, the relay refuses further sends. Turns started by ccim itself (a wake note in Claude Code, a `codex queue` turn in Codex) do not count as typing.
 
 ## Layout
 

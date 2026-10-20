@@ -118,8 +118,11 @@ test("a burst wakes once, and the waker does not wake again for messages it alre
 
 test("the prompt hook skips turns the waker started, and resets the guard for real typing", async () => {
   const hook = (prompt) => run("alice-session", ["hook", "prompt"], alice, JSON.stringify({ session_id: "alice-session", prompt }));
-  // 24 sends with no human, then a wake-started turn must not reset the counter.
-  for (let i = 0; i < 30; i++) if (run("bob-session", ["send", "alice", `loop ${i}`]).status !== 0) break;
+  // 256 sends with no human, then a wake-started turn must not reset the counter. alice reads as she goes so her queue (200 at most) never fills first.
+  for (let i = 0; i < 300; i++) {
+    if (i % 50 === 49) run("alice-session", ["inbox"], alice);
+    if (run("bob-session", ["send", "alice", `loop ${i}`]).status !== 0) break;
+  }
   assert.match(run("bob-session", ["send", "alice", "x"]).stderr, /blocked/);
   hook(posted(aliceSock).at(-1) || '[ccim] new message(s) in channel "wake-test"');
   assert.match(run("bob-session", ["send", "alice", "x"]).stderr, /blocked/, "a wake is not a human");
