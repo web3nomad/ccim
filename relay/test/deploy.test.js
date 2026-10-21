@@ -28,13 +28,18 @@ const persist = join(work, "state");
 const PRE_OAUTH = "db5e6a1";
 const MAIN_DIR = join(work, "pre-oauth-relay");
 mkdirSync(join(MAIN_DIR, "src"), { recursive: true });
-for (const f of ["src/index.js", "wrangler.toml"]) writeFileSync(join(MAIN_DIR, f), execFileSync("git", ["show", `${PRE_OAUTH}:relay/${f}`], { cwd: RELAY_DIR }));
+for (const f of ["src/index.js", "wrangler.toml"]) {
+  let content = execFileSync("git", ["show", `${PRE_OAUTH}:relay/${f}`], { cwd: RELAY_DIR, encoding: "utf8" });
+  // Historical routes can trigger remote zone discovery even in a local migration test.
+  if (f === "wrangler.toml") content = content.replace(/^routes\s*=.*$/m, "");
+  writeFileSync(join(MAIN_DIR, f), content);
+}
 
 let relay, relayLog = "";
 async function start(dir, vars = {}) {
   if (relay) await stop();
   relayLog = "";
-  relay = spawn(WRANGLER, ["dev", "--local", "--port", String(PORT), "--persist-to", persist, "--show-interactive-dev-session=false", ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`])], { cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
+  relay = spawn(WRANGLER, ["dev", "--local", ...(dir === RELAY_DIR ? ["--config", "wrangler.example.toml"] : []), "--name", "ccim-relay", "--port", String(PORT), "--persist-to", persist, "--show-interactive-dev-session=false", ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`])], { cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
   relay.stdout.on("data", (d) => (relayLog += d));
   relay.stderr.on("data", (d) => (relayLog += d));
   for (let i = 0; i < 120 && !/Ready on/.test(relayLog); i++) await new Promise((r) => setTimeout(r, 500));
@@ -59,7 +64,7 @@ const client = createServer((req, res) => {
 await new Promise((r) => client.listen(0, "127.0.0.1", r));
 const CIMD = `http://localhost:${client.address().port}/cimd.json`;
 const CALLBACK = `http://localhost:${client.address().port}/callback`;
-const oauthVars = (key) => ({ OAUTH_ISSUER: BASE, MCP_ALLOWED_BINDINGS: "xd-bridge/xd-dot", OAUTH_REDIRECT_HOSTS: "localhost", OAUTH_CIMD: "on", ...(key && { OAUTH_ENC_KEY: key }) });
+const oauthVars = (key) => ({ OAUTH_ISSUER: BASE, MCP_ALLOWED_BINDINGS: "example-channel/example-member", OAUTH_REDIRECT_HOSTS: "localhost", OAUTH_CIMD: "on", ...(key && { OAUTH_ENC_KEY: key }) });
 
 after(async () => {
   if (relay) await stop();
@@ -84,7 +89,7 @@ async function http(method, path, { body, form, token, secret } = {}) {
   try { data = JSON.parse(text); } catch {}
   return { status: res.status, headers: res.headers, text, data };
 }
-const channel = (method, op, opts) => http(method, `/c/xd-bridge/${op}`, opts);
+const channel = (method, op, opts) => http(method, `/c/example-channel/${op}`, opts);
 const tool = async (name, args, token) => {
   const r = await http("POST", "/mcp", { body: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, token });
   return r.status === 200 ? r.data.result ?? r.data : r;
@@ -97,7 +102,7 @@ async function connect() {
   const page = await http("GET", `/oauth/authorize?${q}`);
   const request = page.text.match(/name="request" value="([0-9a-f]{32})"/)?.[1];
   assert.ok(request, page.text);
-  const posted = await http("POST", "/oauth/authorize", { form: { request, channel: "xd-bridge", member: "xd-dot", secret: SECRET, action: "allow" } });
+  const posted = await http("POST", "/oauth/authorize", { form: { request, channel: "example-channel", member: "example-member", secret: SECRET, action: "allow" } });
   if (posted.status !== 302) return { page: posted.text };
   const code = new URL(posted.headers.get("location")).searchParams.get("code");
   const t = await http("POST", "/oauth/token", { form: { grant_type: "authorization_code", code, redirect_uri: CALLBACK, client_id: CIMD, code_verifier: verifier, resource: BASE } });
@@ -126,22 +131,22 @@ test("migration v3: this branch starts on the same storage; channel data and CLI
   await stop();
 });
 
-test("with key A: connect, and leave a message queued for xd-dot", async () => {
+test("with key A: connect, and leave a message queued for example-member", async () => {
   await start(RELAY_DIR, oauthVars(KEY_A));
   tokens = await connect();
-  assert.equal((await tool("ccim_who", {}, tokens.access_token)).structuredContent.you, "xd-dot");
-  await channel("POST", "send", { body: { to: "xd-dot", text: "for dot" }, token: alice });
+  assert.equal((await tool("ccim_who", {}, tokens.access_token)).structuredContent.you, "example-member");
+  await channel("POST", "send", { body: { to: "example-member", text: "for dot" }, token: alice });
   await stop();
 });
 
-test("key removed: OAuth off, Dot's tokens refused, channel and CLI unaffected, xd-dot's queue kept", async () => {
+test("key removed: OAuth off, Dot's tokens refused, channel and CLI unaffected, example-member's queue kept", async () => {
   await start(RELAY_DIR, oauthVars(null));
   assert.equal((await http("POST", "/mcp", { body: { jsonrpc: "2.0", id: 1, method: "tools/list" }, token: tokens.access_token })).status, 200, "tokens are not checked while OAuth is off");
   const r = await tool("ccim_who", {}, tokens.access_token);
   assert.equal(r.error.code, -32602, "ccim_* tools do not exist while OAuth is off");
   assert.equal((await http("POST", "/oauth/token", { form: { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: CIMD } })).status, 503);
   assert.equal((await channel("GET", "who", { token: alice })).data.you, "alice");
-  assert.ok((await channel("GET", "who", { token: alice })).data.members.some((m) => m.handle === "xd-dot"), "xd-dot stays a channel member");
+  assert.ok((await channel("GET", "who", { token: alice })).data.members.some((m) => m.handle === "example-member"), "example-member stays a channel member");
   await stop();
 });
 
@@ -155,7 +160,7 @@ test("same key A restored: the existing grant works again, the queued message is
   await stop();
 });
 
-test("different key B: grant ends cleanly (401, no 500), reconnect refused until xd-dot is cleared, CLI unaffected", async () => {
+test("different key B: grant ends cleanly (401, no 500), reconnect refused until example-member is cleared, CLI unaffected", async () => {
   await start(RELAY_DIR, oauthVars(KEY_B));
   // The member token no longer decrypts: the grant is revoked and the request gets a 401 with a challenge.
   const r = await http("POST", "/mcp", { body: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "ccim_who", arguments: {} } }, token: tokens.access_token });
@@ -167,16 +172,16 @@ test("different key B: grant ends cleanly (401, no 500), reconnect refused until
   assert.equal((await http("POST", "/oauth/token", { form: { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: CIMD } })).data.error, "invalid_grant");
   assert.doesNotMatch(relayLog, /oauth_error/);
 
-  // The old xd-dot member still exists in the channel, but nobody holds a usable token for it any more.
+  // The old example-member member still exists in the channel, but nobody holds a usable token for it any more.
   const again = await connect();
   assert.match(again.page, /already used by another session/);
   assert.equal((await channel("GET", "who", { token: alice })).data.you, "alice");
 
-  // Clearing it the way XD would with the CLI: join as xd-dot (takes it over), then leave. Its queue goes with it.
-  const takeover = (await channel("POST", "join", { body: { handle: "xd-dot" }, secret: SECRET })).data.token;
+  // Clearing it the way XD would with the CLI: join as example-member (takes it over), then leave. Its queue goes with it.
+  const takeover = (await channel("POST", "join", { body: { handle: "example-member" }, secret: SECRET })).data.token;
   await channel("POST", "leave", { body: {}, token: takeover });
   tokens = await connect();
-  assert.equal((await tool("ccim_who", {}, tokens.access_token)).structuredContent.you, "xd-dot");
+  assert.equal((await tool("ccim_who", {}, tokens.access_token)).structuredContent.you, "example-member");
   assert.equal((await tool("ccim_inbox", {}, tokens.access_token)).content[0].text, "No unacknowledged messages.");
   await stop();
 });
@@ -201,12 +206,12 @@ test("production default (OAUTH_CIMD unset): metadata says no CIMD, a CIMD clien
   const q2 = new URLSearchParams({ response_type: "code", client_id: reg.data.client_id, redirect_uri: CALLBACK, state: "s2", code_challenge: challenge, code_challenge_method: "S256", resource: `${BASE}/mcp`, scope: "ccim:read ccim:write" });
   const page = await http("GET", `/oauth/authorize?${q2}`);
   const request = page.text.match(/name="request" value="([0-9a-f]{32})"/)[1];
-  const posted = await http("POST", "/oauth/authorize", { form: { request, channel: "xd-bridge", member: "xd-dot", secret: SECRET, action: "allow" } });
+  const posted = await http("POST", "/oauth/authorize", { form: { request, channel: "example-channel", member: "example-member", secret: SECRET, action: "allow" } });
   const loc = new URL(posted.headers.get("location"));
   assert.equal(loc.searchParams.get("iss"), BASE);
   const t = await http("POST", "/oauth/token", { form: { grant_type: "authorization_code", code: loc.searchParams.get("code"), redirect_uri: CALLBACK, client_id: reg.data.client_id, code_verifier: verifier, resource: `${BASE}/mcp` } });
   assert.equal(t.status, 200, t.text);
-  assert.equal((await tool("ccim_who", {}, t.data.access_token)).structuredContent.you, "xd-dot");
+  assert.equal((await tool("ccim_who", {}, t.data.access_token)).structuredContent.you, "example-member");
   await stop();
 });
 

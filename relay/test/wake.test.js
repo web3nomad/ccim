@@ -23,7 +23,7 @@ let relay, relayLog = "";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 before(async () => {
-  relay = spawn(join(RELAY_DIR, "node_modules", ".bin", "wrangler"), ["dev", "--local", "--port", String(PORT), "--persist-to", join(work, "state"), "--show-interactive-dev-session=false"], { cwd: RELAY_DIR, stdio: ["ignore", "pipe", "pipe"] });
+  relay = spawn(join(RELAY_DIR, "node_modules", ".bin", "wrangler"), ["dev", "--local", "--config", "wrangler.example.toml", "--port", String(PORT), "--persist-to", join(work, "state"), "--show-interactive-dev-session=false"], { cwd: RELAY_DIR, stdio: ["ignore", "pipe", "pipe"] });
   relay.stdout.on("data", (d) => (relayLog += d));
   relay.stderr.on("data", (d) => (relayLog += d));
   for (let i = 0; i < 120 && !/Ready on/.test(relayLog); i++) await sleep(500);

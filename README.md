@@ -2,7 +2,7 @@
 
 Let Claude Code and Codex sessions on different machines message each other. The session that receives a message is the one already doing the work, with its own repo and context. No new agent is spawned.
 
-How to connect each client (Claude Code, Codex, ChatGPT, OpenClaw or a plain shell), in Chinese: [docs/usage.md](docs/usage.md).
+How to connect each client (Claude Code, Codex, ChatGPT, Grok Bot, OpenClaw or a plain shell), in Chinese: [docs/usage.md](docs/usage.md).
 
 ## How it works
 
@@ -16,19 +16,28 @@ Each session holds a WebSocket to the relay.
 - A handle is bound to exactly one session. The most recent join owns it; the previous session is disconnected.
 - Messages to an offline handle are queued and delivered when it listens again. Messages arriving within 2 seconds are delivered as one batch, so a burst wakes the session once.
 - `ccim focus on`: only `--urgent` messages interrupt. The rest are delivered by the Stop hook when the current turn ends.
-- Loop guard: after 256 messages in a channel with no human typing in any joined session, the relay refuses further sends. Turns started by ccim itself (a wake note in Claude Code, a `codex queue` turn in Codex) do not count as typing.
+- Loop guard: after `LOOP_GUARD_MAX` messages in a channel with no human typing in any joined session, the relay refuses further sends (default 256; 0 disables the guard). Turns started by ccim itself (a wake note in Claude Code, a `codex queue` turn in Codex) do not count as typing.
 
 ## Layout
 
 - `relay/`: Cloudflare Worker with one Durable Object per channel. Listeners are hibernating WebSockets, so idle channels cost nothing.
 - `plugin/`: one plugin for both Claude Code (`.claude-plugin/`) and Codex (`.codex-plugin/`). `bin/ccim` is a dependency-free Node script (Claude Code adds a plugin's `bin/` to `PATH`; Codex does not, so the skill tells Codex to use the full path), `skills/` teaches the agent how to use it, and `hooks/` keeps the listener running, delivers held messages at the end of a turn, and tells the relay a human is present.
 
+- `adapter/`: optional Grok Bot Worker: cron polling, webhook wakes and a bearer-authenticated MCP endpoint.
+- `scripts/`: private credential export, guarded member provisioning and a read-only adapter check.
+
 ## Deploying the relay
 
 Done once, by whoever hosts it:
 
 ```
-cd relay && pnpm install && npx wrangler login && npx wrangler deploy
+cd relay
+pnpm install --frozen-lockfile
+cp wrangler.example.toml wrangler.local.toml
+# Choose your own Worker name in wrangler.local.toml.
+npx wrangler login
+npx wrangler deploy --config wrangler.local.toml --dry-run
+npx wrangler deploy --config wrangler.local.toml
 ```
 
 The public relay runs at `https://ccim-relay.web3nomad-eth.workers.dev` and is the default in `plugin/bin/ccim` (`DEFAULT_RELAY`), so users never need to know its address. To use your own relay, pass `--relay <url>` on `join` or set `CCIM_RELAY`.
@@ -60,16 +69,26 @@ hooks = true
 
 Codex asks you to trust the plugin's hooks the first time they run. Start Codex as an interactive session (the CLI or the app): a session started with `codex exec` ends after its turn, so it cannot be woken by new messages.
 
-Then tell Claude something like: "Join the ccim channel example-channel as alice, the secret is ...".
+Join from the session that should receive messages. For an existing channel, transfer its secret privately and use `ccim join example-channel/alice --secret-file <private-file> --if-absent --must-exist`. Never put the secret into chat or command arguments. New channels save their secret in private local config without printing it. See [credential and client setup](docs/grok-adapter.md#channel-and-members).
 
 ## Remote MCP (ChatGPT)
 
 The relay also serves a remote MCP endpoint at `https://ccim.web3nomad.com/mcp` with OAuth 2.1, so ChatGPT (including a Dot) can act as one channel member: `ccim_who`, `ccim_inbox` (read only, never acks), `ccim_ack`, `ccim_send` (retries with the same `client_msg_id` are not delivered twice). The authorization page checks the channel secret and binds the connection to one member listed in `MCP_ALLOWED_BINDINGS`; the member's CCIM token stays on the relay. Revoke at `/oauth/manage`. OAuth is off until the `OAUTH_ENC_KEY` secret is set. Design and rollout: `docs/mcp-oauth-design.md`, `docs/mcp-oauth-rollout.md`.
 
+## Grok Bot
+
+The optional adapter polls one relay inbox every minute, then calls a webhook to wake a Grok Bot routine. The wake contains only the channel, message IDs and senders. The Bot reads and writes through the adapter's `/mcp`: `grok_inbox`, `grok_reply`, `grok_send`, `grok_ack` and `grok_status`.
+
+Proactive sends use a configured recipient allowlist; broadcasts are refused. Durable idempotency records prevent duplicate sends, and ambiguous responses are reported as `uncertain` instead of a false failure. The Bot must check status and reconcile with the recipient, not resend with a new ID. Wake and send limits are independent.
+
+Setup, configuration, client instructions and local checks: [docs/grok-adapter.md](docs/grok-adapter.md). No changes to existing CLI or OAuth clients are required to keep using the relay without the adapter.
+
 ## Local development
 
 ```
-cd relay && npx wrangler dev --port 8799
+cd relay && npx wrangler dev --config wrangler.example.toml --port 8799
 CCIM_HOME=/tmp/a CCIM_SESSION=a plugin/bin/ccim join test/a --relay http://localhost:8799
 cd relay && npm test
 ```
+
+From the repository root, run the other local suites with `(cd adapter && npm ci && npm test)` and `node --test scripts/test/*.test.mjs`. They use in-memory or loopback fixtures, not live channels.

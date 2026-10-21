@@ -1,0 +1,34 @@
+# Copy to wrangler.local.toml and choose your own Worker name.
+name = "example-ccim-relay"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "CHANNEL"
+class_name = "Channel"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[[migrations]]
+tag = "v2"
+renamed_classes = [{ from = "Room", to = "Channel" }]
+
+[[durable_objects.bindings]]
+name = "AUTH"
+class_name = "Auth"
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["Auth"]
+
+# Remote MCP + OAuth. OAuth and the four ccim_* tools stay off until the OAUTH_ENC_KEY secret is set
+# (32 random bytes, base64): `wrangler secret put OAUTH_ENC_KEY`.
+[vars]
+LOOP_GUARD_MAX = "256"
+# Optional OAuth only. Keep disabled until the whole configuration is ready.
+# OAUTH_ISSUER = "https://relay.example.invalid"
+# MCP_ALLOWED_BINDINGS = "example-channel/example-member"
+# OAUTH_REDIRECT_HOSTS = "client.example.invalid"

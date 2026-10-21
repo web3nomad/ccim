@@ -103,26 +103,39 @@ function ensureWaker(s, socket, token) {
   return true;
 }
 
+function secretFromArgs(args) {
+  const index = args.indexOf("--secret-file");
+  if (index < 0) return args.includes("--secret") ? args[args.indexOf("--secret") + 1] : undefined;
+  const file = args[index + 1];
+  if (!file || file.startsWith("--")) throw new Error("--secret-file requires a private file path");
+  let secret;
+  try { secret = fs.readFileSync(file, "utf8").trim(); }
+  catch { throw new Error("Cannot read --secret-file; check the private file path and permissions"); }
+  if (!secret) throw new Error("--secret-file is empty; no request sent");
+  return secret;
+}
+
 const commands = {
   async join(args) {
     if (!sessionId) die("no session id; run this from inside Claude Code or Codex (or set CCIM_SESSION)");
     const m = (args[0] || "").match(/^([a-z0-9][a-z0-9_-]{0,31})\/([a-z0-9][a-z0-9_-]{0,31})$/);
-    if (!m) die("usage: ccim join <channel>/<handle> [--secret <secret>] [--relay <url>]   (lowercase letters, digits, - and _)");
+    if (!m) die("usage: ccim join <channel>/<handle> [--secret-file <path>] [--relay <url>] [--if-absent] [--must-exist]   (lowercase letters, digits, - and _)");
     const [, channel, handle] = m;
     const flag = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 
     const config = { channels: {}, ...readJson(CONFIG, {}) };
     const relay = (flag("--relay") || process.env.CCIM_RELAY || config.relay || DEFAULT_RELAY).replace(/\/$/, "");
     if (!relay) die("no relay configured; pass --relay <url>");
-    const known = flag("--secret") || config.channels[channel]?.secret;
+    const known = secretFromArgs(args) || config.channels[channel]?.secret;
     const secret = known || crypto.randomBytes(24).toString("base64url");
 
     const old = loadSession();
-    stopListeners(old);
-
-    const res = await api({ relay, channel, secret }, "POST", "join", { handle });
-    if (res.status === 403) die(known ? `wrong secret for channel "${channel}"` : `channel "${channel}" already exists. Get its secret from whoever created it and pass --secret <secret>`);
+    const res = await api({ relay, channel, secret }, "POST", "join", {
+      handle, ifAbsent: args.includes("--if-absent"), mustExist: args.includes("--must-exist"),
+    });
+    if (res.status === 403) die(known ? `wrong secret for channel "${channel}"` : `channel "${channel}" already exists. Get its secret from whoever created it and use --secret-file <path> for join`);
     if (res.status !== 200) die(`join failed: ${res.error || res.status}`);
+    stopListeners(old);
 
     config.relay = relay;
     config.channels[channel] = { secret };
@@ -133,7 +146,7 @@ const commands = {
     const waking = host !== "codex" && ensureWaker(s, process.env.CLAUDE_CODE_MESSAGING_SOCKET, process.env.CLAUDE_CODE_MESSAGING_TOKEN);
 
     console.log(`[ccim] joined channel "${channel}" as "${handle}". This handle is now bound to this session only.`);
-    if (res.created) console.log(`[ccim] you created this channel. To invite someone, give them:\n  ccim join ${channel}/<their-handle> --secret ${secret} --relay ${relay}`);
+    if (res.created) console.log("[ccim] channel created; secret saved in private CCIM_HOME/config.json. Share it only through a secure credential channel.");
     console.log(`[ccim] members: ${res.members.map((x) => x.handle + (x.online ? " (online)" : "")).join(", ")}`);
     console.log(
       waking ? "[ccim] listening: new messages wake this session with a note to run `ccim inbox`. Nothing else to start."
@@ -278,11 +291,12 @@ const commands = {
 
   async delete(args) {
     const channel = args[0];
-    if (!channel || channel.startsWith("-")) die("usage: ccim delete <channel> [--secret <secret>]");
+    if (!channel || channel.startsWith("-")) die("usage: ccim delete <channel> [--secret-file <path>]");
     const config = { channels: {}, ...readJson(CONFIG, {}) };
-    const secret = (args.includes("--secret") && args[args.indexOf("--secret") + 1]) || config.channels[channel]?.secret;
-    if (!secret) die(`no secret for channel "${channel}" on this machine; pass --secret <secret>`);
+    const secret = secretFromArgs(args) || config.channels[channel]?.secret;
+    if (!secret) die(`no secret for channel "${channel}" in private config; do not paste it into command arguments`);
     const relay = (process.env.CCIM_RELAY || config.relay || DEFAULT_RELAY).replace(/\/$/, "");
+    if (!relay) die("no relay configured; set CCIM_RELAY");
     const res = await api({ relay, channel, secret }, "POST", "delete");
     if (res.status === 404) die(`channel "${channel}" does not exist`);
     if (res.status === 403) die(`wrong secret for channel "${channel}"`);
@@ -477,8 +491,11 @@ function socketAlive(socket) {
 
 const [cmd, ...args] = process.argv.slice(2);
 if (!commands[cmd]) {
-  console.log("usage: ccim <join|send|inbox|listen|who|focus|leave|delete|status>\n  join <channel>/<handle> [--secret s] [--relay url]\n  send <handle|*> [--urgent] \"<text>\"\n  inbox             print the messages waiting for this session and mark them read\n  listen            make sure this session receives messages (outside Claude Code and Codex: wait, print, exit)\n  who | focus on|off | leave | status\n  delete <channel> [--secret s]   delete the whole channel for everyone");
+  console.log("usage: ccim <join|send|inbox|listen|who|focus|leave|delete|status>\n  join <channel>/<handle> [--secret-file path] [--relay url]\n  send <handle|*> [--urgent] \"<text>\"\n  inbox             print the messages waiting for this session and mark them read\n  listen            make sure this session receives messages (outside Claude Code and Codex: wait, print, exit)\n  who | focus on|off | leave | status\n  delete <channel> [--secret-file path]   delete the whole channel for everyone");
   process.exit(cmd ? 1 : 0);
+}
+if ((cmd === "join" || cmd === "delete") && args.includes("--secret")) {
+  console.error("[ccim] --secret is deprecated: arguments may be visible in shell history and process listings. Use --secret-file <private-file> instead. Credential value omitted.");
 }
 Promise.resolve(commands[cmd](args)).then(
   () => process.exit(0),

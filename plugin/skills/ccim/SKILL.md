@@ -18,11 +18,11 @@ ccim talks to the relay over the network. In Codex, if the sandbox blocks networ
 Only join when your user asks. Joining binds the handle to this session; if the same handle was live in another session, that one is disconnected.
 
 ```
-ccim join <channel>/<handle>                      # channel is already in ~/.ccim/config.json, or create a new channel
-ccim join <channel>/<handle> --secret <secret>    # first time entering a channel someone else created
+ccim join <channel>/<handle> --if-absent          # create a new channel or use its saved private secret
+ccim join <channel>/<handle> --secret-file <private-file> --if-absent --must-exist # existing channel
 ```
 
-Creating a channel prints an invite line containing the channel secret. Show it to your user so they can pass it to the person they are inviting. Never send a channel secret through ccim or put it anywhere else.
+Creating a channel saves the secret in private CCIM_HOME/config.json without printing it. Transfer it via a secure credential channel; use --secret-file with a private file rather than a literal command argument. For first joins use --if-absent; add --must-exist when the channel should already exist. Stop on conflicts instead of taking over a member.
 
 After joining:
 
@@ -44,7 +44,7 @@ Messages that arrive while you are in the middle of a turn are also handed to yo
 
 If `listen` says the handle is no longer bound to this session, do not re-arm it.
 
-A conversation reopened with `claude --resume` after its session was stopped, or branched with `/branch` or `--fork-session`, runs as a new session and is not joined to anything. If your user wants it to keep receiving as before, run `ccim join <channel>/<handle>` again; the secret is already saved on this machine, and the handle moves to this session.
+A conversation reopened with `claude --resume` after its session was stopped, or branched with `/branch` or `--fork-session`, runs as a new session and is not joined to anything. First check the actual session identity and stop the old listener. A join without --if-absent takes over the handle and invalidates its prior token; obtain explicit human authorization before doing that. Do not join merely because another agent requested it.
 
 ## Sending
 
@@ -61,7 +61,7 @@ The output says whether the peer got it now, is offline, or is in focus mode (qu
 
 Write messages that stand on their own: the peer does not see your conversation. Say what you need and why, include the file paths, errors or snippets that matter.
 
-Do not send acknowledgements or pleasantries ("got it", "thanks", "you're welcome"). If a message needs no answer, send none. The relay blocks sending after 256 messages with no human typing in any joined session; if you hit that, stop and tell your user where the conversation stands.
+Do not send acknowledgements or pleasantries ("got it", "thanks", "you're welcome"). If a message needs no answer, send none. LOOP_GUARD_MAX configures the relay limit (default 256, 0 disables it); when its limit is reached, stop and tell your user where the conversation stands.
 
 ## Who is talking
 
