@@ -165,27 +165,40 @@ export class Channel extends DurableObject {
 
     const id = ((await this.ctx.storage.get("seq")) || 0) + 1;
     const msg = { type: "msg", id, from, to, text, urgent: !!urgent, ts: Date.now() };
+    // The message and the counters are written together, before anything is pushed, so a failed push
+    // can never leave a queued message behind with its id still free.
+    const writes = { seq: id, streak: streak + 1 };
+    for (const t of targets) writes[`q:${t}:${pad(id)}`] = msg;
+    await this.ctx.storage.put(writes);
+
     const delivery = {};
     for (const t of targets) {
-      await this.ctx.storage.put(`q:${t}:${pad(id)}`, msg);
       const member = members.find((m) => m.handle === t);
-      const sockets = this.ctx.getWebSockets(t);
-      if (!sockets.length) delivery[t] = "queued_offline";
-      else if (member.focus && !msg.urgent) delivery[t] = "queued_focus";
-      else {
-        for (const ws of sockets) ws.send(JSON.stringify(msg));
-        delivery[t] = "delivered";
-      }
+      if (member.focus && !msg.urgent) delivery[t] = "queued_focus";
+      else delivery[t] = this.push(t, msg) ? "delivered" : "queued_offline";
     }
-    const updates = { seq: id, streak: streak + 1 };
     if (dedup) {
       const now = Date.now();
-      updates[dedup.key] = { ts: now, hash: dedup.hash, result: { id, delivery } };
-      updates[`cidt:${tsKey(now)}:${from}:${clientId}`] = dedup.key;
       await this.sweepClientIds(now);
+      await this.ctx.storage.put({
+        [dedup.key]: { ts: now, hash: dedup.hash, result: { id, delivery } },
+        [`cidt:${tsKey(now)}:${from}:${clientId}`]: dedup.key,
+      });
     }
-    await this.ctx.storage.put(updates);
     return json(200, { id, delivery });
+  }
+
+  // Pushes a message to every live socket of a handle. A socket that is closing throws on send; it counts as
+  // not delivered, and the message stays queued for the next listen. True if at least one socket took it.
+  push(handle, msg) {
+    let sent = false;
+    for (const ws of this.ctx.getWebSockets(handle)) {
+      try {
+        ws.send(JSON.stringify(msg));
+        sent = true;
+      } catch {}
+    }
+    return sent;
   }
 
   // Drops send records older than the retry window, a few at a time, as sends happen.
@@ -202,7 +215,7 @@ export class Channel extends DurableObject {
     await this.ctx.storage.put(`m:${handle}`, { ...member, focus: on });
     if (!on) {
       const backlog = await this.pending(handle, true);
-      for (const ws of this.ctx.getWebSockets(handle)) for (const msg of backlog) ws.send(JSON.stringify(msg));
+      for (const msg of backlog) this.push(handle, msg);
     }
     return json(200, { focus: on });
   }

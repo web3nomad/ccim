@@ -4,6 +4,11 @@ compatibility_date = "2026-01-01"
 workers_dev = true
 routes = [{ pattern = "ccim.web3nomad.com", custom_domain = true }]
 
+# Keeps request and error logs (and exceptions) so a 500 can be looked up afterwards.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [[durable_objects.bindings]]
 name = "CHANNEL"
 class_name = "Channel"
