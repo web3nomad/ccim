@@ -4,10 +4,15 @@ compatibility_date = "2026-01-01"
 workers_dev = true
 routes = [{ pattern = "ccim.web3nomad.com", custom_domain = true }]
 
-# Keeps request and error logs (and exceptions) so a 500 can be looked up afterwards.
+# Keeps the relay's own log lines, errors and uncaught exceptions, so a 500 can be looked up afterwards.
+# Per-request invocation logs stay off: requests carry the channel secret and member tokens in headers
+# (x-ccim-secret, authorization, sec-websocket-protocol), and Cloudflare does not document redacting them.
 [observability]
 enabled = true
 head_sampling_rate = 1
+
+[observability.logs]
+invocation_logs = false
 
 [[durable_objects.bindings]]
 name = "CHANNEL"
