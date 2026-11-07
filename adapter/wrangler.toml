@@ -1,0 +1,36 @@
+# Copy to wrangler.local.toml, then replace example names and URLs.
+name = "example-grok-adapter"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+workers_dev = true
+
+[triggers]
+crons = ["* * * * *"]
+
+[[durable_objects.bindings]]
+name = "ADAPTER"
+class_name = "Adapter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Adapter"]
+
+[vars]
+CCIM_RELAY = "https://relay.example.invalid"
+CCIM_CHANNEL = "example-channel"
+CCIM_HANDLE = "grok"
+# Stable identity of this relay's data; do not change for an alias or redeploy.
+STATE_NAMESPACE = "example-relay/example-channel/grok"
+RELAY_MODE = "direct"
+MCP_ENABLED = "on"
+MAX_HOP = "2"
+SENDER_LIMIT = "3"
+SENDER_WINDOW_MIN = "10"
+DAILY_CAP = "30"
+# Comma-separated member handles. Empty disables proactive sends; broadcasts/self are refused.
+SEND_ALLOWED_RECIPIENTS = ""
+SEND_LIMIT = "10"
+SEND_WINDOW_MIN = "10"
+SEND_DAILY_CAP = "100"
+WAKE_MAX_ATTEMPTS = "5"
+DAY_TZ_OFFSET_MIN = "0"

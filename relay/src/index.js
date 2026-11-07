@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { loopGuardMax } from "./loop-guard.js";
 import { handleMcp } from "./mcp.js";
 import { handleOAuth } from "./oauth.js";
 export { Auth } from "./oauth.js";
@@ -6,9 +7,6 @@ export { Auth } from "./oauth.js";
 const NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const MAX_TEXT = 16 * 1024;
 const MAX_QUEUE = 200;
-// Sends allowed in a channel since a human last typed in any joined session.
-// Stops two agents from chatting forever with nobody watching.
-const MAX_STREAK = 256;
 // A send carrying a clientId is answered from this record when retried within the window, instead of being delivered twice.
 const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
 const DEDUP_MS = 24 * 60 * 60 * 1000;
@@ -71,7 +69,7 @@ export class Channel extends DurableObject {
 
   async join(req) {
     // ifAbsent: refuse instead of taking over an existing handle. mustExist: never create the channel.
-    // The CLI sends neither, so it keeps the newest-join-wins behaviour.
+    // Clients omitting the guards retain the explicit newest-join-wins behaviour.
     const { handle, ifAbsent, mustExist } = await req.json().catch(() => ({}));
     const secret = req.headers.get("x-ccim-secret") || "";
     if (!NAME.test(handle || "")) return json(400, { error: "bad_handle" });
@@ -152,7 +150,8 @@ export class Channel extends DurableObject {
       }
     }
     const streak = (await this.ctx.storage.get("streak")) || 0;
-    if (streak >= MAX_STREAK) return json(429, { error: "no_human_in_the_loop", max: MAX_STREAK });
+    const max = loopGuardMax(this.env.LOOP_GUARD_MAX);
+    if (max > 0 && streak >= max) return json(429, { error: "no_human_in_the_loop", max });
 
     const members = await this.members();
     const targets = to === "*" ? members.map((m) => m.handle).filter((h) => h !== from) : [to];

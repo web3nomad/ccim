@@ -1,0 +1,8 @@
+# Local development only. Replace every placeholder before use.
+CCIM_TOKEN=REPLACE_WITH_GROK_MEMBER_TOKEN
+MCP_BEARER=REPLACE_WITH_RANDOM_LONG_BEARER
+WEBHOOK_URL=https://webhook.example.invalid/REPLACE_ME
+WEBHOOK_KEY=REPLACE_WITH_ROUTINE_WEBHOOK_KEY
+# Optional author-mcp mode only; direct mode does not use these.
+# OAUTH_CLIENT_ID=REPLACE_WITH_CLIENT_ID
+# OAUTH_REFRESH_TOKEN=REPLACE_WITH_REFRESH_TOKEN

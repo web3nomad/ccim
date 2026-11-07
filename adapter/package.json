@@ -1,0 +1,16 @@
+{
+  "name": "ccim-grok-adapter",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "CCIM bridge for Grok routines: scoped MCP inbox, reply, send, ack and status",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "wrangler": "^4.151.2"
+  }
+}

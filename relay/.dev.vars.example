@@ -1,0 +1,3 @@
+# Optional OAuth only. Direct CLI and Grok adapter mode need no relay secret.
+# Generate 32 random bytes, base64-encoded, if enabling OAuth.
+# OAUTH_ENC_KEY=REPLACE_WITH_32_RANDOM_BYTES_BASE64
