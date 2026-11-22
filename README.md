@@ -66,6 +66,10 @@ Then tell Claude something like: "Join the ccim channel example-channel as alice
 
 The relay also serves a remote MCP endpoint at `https://ccim.web3nomad.com/mcp` with OAuth 2.1, so ChatGPT (including a Dot) can act as one channel member: `ccim_who`, `ccim_inbox` (read only, never acks), `ccim_ack`, `ccim_send` (retries with the same `client_msg_id` are not delivered twice). The authorization page checks the channel secret and binds the connection to one member listed in `MCP_ALLOWED_BINDINGS`; the member's CCIM token stays on the relay. Revoke at `/oauth/manage`. OAuth is off until the `OAUTH_ENC_KEY` secret is set. Design and rollout: `docs/mcp-oauth-design.md`, `docs/mcp-oauth-rollout.md`.
 
+## Operator listing
+
+Whoever runs the relay can list every channel with its members, unread counts and last activity (no message text, secrets or tokens): set a random `ADMIN_TOKEN` secret on the Worker (`wrangler secret put ADMIN_TOKEN`, 32+ characters), save it as `{ "token": "..." }` in `~/.ccim/admin.json`, and run `node relay/scripts/admin-channels.mjs`. The script lists the relay's Durable Objects through your Cloudflare login (`wrangler login`) and asks `POST /admin/channels` about each one. Without the token that path answers like any unknown path. A channel created before names were recorded shows its id until someone reaches it by name again.
+
 ## Local development
 
 ```
