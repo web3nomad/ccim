@@ -23,6 +23,7 @@ export default {
     const path = new URL(req.url).pathname;
     if (path === "/mcp") return handleMcp(req, env);
     if (path.startsWith("/.well-known/oauth-") || path.startsWith("/oauth/")) return handleOAuth(req, env);
+    if (path === "/admin/channels") return adminChannels(req, env);
     const m = new URL(req.url).pathname.match(/^\/c\/([^/]+)\/([a-z]+)$/);
     if (!m) return json(404, { error: "not_found" });
     if (!NAME.test(m[1])) return json(400, { error: "bad_channel_name" });
@@ -31,8 +32,9 @@ export default {
 };
 
 // One Durable Object per channel. Storage layout:
-//   channel          -> { secretHash, createdAt }
+//   channel          -> { secretHash, createdAt, name }   (name is recorded on the first request that carries it)
 //   seq, streak   -> counters
+//   lastAt        -> time of the last join or send
 //   m:<handle>    -> { tokenHash, focus }
 //   tok:<hash>    -> handle
 //   q:<handle>:<id> -> message waiting for that handle
@@ -45,6 +47,7 @@ export class Channel extends DurableObject {
   }
 
   async fetch(req) {
+    await this.recordName();
     const op = new URL(req.url).pathname.split("/")[3];
     if (op === "join" && req.method === "POST") return this.join(req);
     if (op === "delete" && req.method === "POST") return this.remove(req);
@@ -81,7 +84,7 @@ export class Channel extends DurableObject {
     if (!channel) {
       if (mustExist) return json(404, { error: "no_such_channel" });
       if (secret.length < 16) return json(400, { error: "secret_too_short" });
-      channel = { secretHash: await sha256(secret), createdAt: Date.now() };
+      channel = { secretHash: await sha256(secret), createdAt: Date.now(), ...(this.ctx.id.name && { name: this.ctx.id.name }) };
       await this.ctx.storage.put("channel", channel);
     } else if ((await sha256(secret)) !== channel.secretHash) {
       return json(403, { error: "wrong_secret" });
@@ -97,7 +100,7 @@ export class Channel extends DurableObject {
     const token = hex(crypto.getRandomValues(new Uint8Array(32)));
     const tokenHash = await sha256(token);
     await this.ctx.storage.put(`m:${handle}`, { tokenHash, focus: false });
-    await this.ctx.storage.put(`tok:${tokenHash}`, handle);
+    await this.ctx.storage.put({ [`tok:${tokenHash}`]: handle, lastAt: Date.now() });
     return json(200, { token, created, members: await this.members() });
   }
 
@@ -119,6 +122,31 @@ export class Channel extends DurableObject {
     if (!channel) return json(404, { error: "no_such_channel" });
     if ((await sha256(req.headers.get("x-ccim-secret") || "")) !== channel.secretHash) return json(403, { error: "wrong_secret" });
     return json(200, { ok: true });
+  }
+
+  // Channels created before names were recorded only learn theirs when reached by name. Reached through
+  // idFromString (as the admin listing does), ctx.id.name is undefined, so this does nothing then.
+  async recordName() {
+    if (this.named || !this.ctx.id.name) return;
+    const channel = await this.ctx.storage.get("channel");
+    if (channel && !channel.name) await this.ctx.storage.put("channel", { ...channel, name: this.ctx.id.name });
+    this.named = true;
+  }
+
+  // For the operator's listing (RPC, so only Worker code can call it). Names, counts and times only:
+  // never the secret hash, member tokens or message text.
+  async adminInfo() {
+    await this.recordName();
+    const channel = await this.ctx.storage.get("channel");
+    if (!channel) return null;
+    const members = [];
+    for (const [key, m] of await this.ctx.storage.list({ prefix: "m:" })) {
+      const handle = key.slice(2);
+      const unread = (await this.ctx.storage.list({ prefix: `q:${handle}:`, limit: MAX_QUEUE + 1 })).size;
+      members.push({ handle, online: this.ctx.getWebSockets(handle).length > 0, focus: !!m.focus, unread });
+    }
+    const [seq, lastAt] = [await this.ctx.storage.get("seq"), await this.ctx.storage.get("lastAt")];
+    return { name: channel.name ?? this.ctx.id.name ?? null, createdAt: channel.createdAt, lastAt: lastAt ?? null, messages: seq || 0, members };
   }
 
   async auth(req) {
@@ -167,7 +195,7 @@ export class Channel extends DurableObject {
     const msg = { type: "msg", id, from, to, text, urgent: !!urgent, ts: Date.now() };
     // The message and the counters are written together, before anything is pushed, so a failed push
     // can never leave a queued message behind with its id still free.
-    const writes = { seq: id, streak: streak + 1 };
+    const writes = { seq: id, streak: streak + 1, lastAt: msg.ts };
     for (const t of targets) writes[`q:${t}:${pad(id)}`] = msg;
     await this.ctx.storage.put(writes);
 
@@ -267,8 +295,41 @@ export class Channel extends DurableObject {
   }
 }
 
+// The operator's view of channels, for whoever holds the ADMIN_TOKEN secret. The Worker cannot list its own
+// Durable Objects, so the caller passes object ids (from the Cloudflare API) and/or channel names.
+// Without the secret set, or with a wrong token, it answers exactly like an unknown path.
+const MAX_ADMIN_ITEMS = 1000;
+async function adminChannels(req, env) {
+  const notFound = json(404, { error: "not_found" });
+  const given = (req.headers.get("authorization") || "").replace(/^Bearer /, "");
+  if (!env.ADMIN_TOKEN || env.ADMIN_TOKEN.length < 32 || req.method !== "POST" || !given) return notFound;
+  if (!crypto.subtle.timingSafeEqual(await digest(given), await digest(env.ADMIN_TOKEN))) return notFound;
+
+  const { ids = [], names = [] } = await req.json().catch(() => ({}));
+  if (!Array.isArray(ids) || !Array.isArray(names) || ids.length + names.length > MAX_ADMIN_ITEMS) return json(400, { error: "bad_request" });
+  // A name gives the channel's id; an id alone is used as it is (its name then comes from storage, if recorded).
+  const targets = new Map();
+  for (const name of names) if (typeof name === "string" && NAME.test(name)) targets.set(env.CHANNEL.idFromName(name).toString(), name);
+  for (const id of ids) if (typeof id === "string" && /^[0-9a-f]{64}$/.test(id) && !targets.has(id)) targets.set(id, null);
+
+  const channels = [];
+  for (const [id, name] of targets) {
+    let stub;
+    try {
+      stub = env.CHANNEL.get(name ? env.CHANNEL.idFromName(name) : env.CHANNEL.idFromString(id));
+    } catch {
+      channels.push({ id, error: "not_a_channel_id" });
+      continue;
+    }
+    const info = await stub.adminInfo().catch((e) => ({ error: String(e?.message || e) }));
+    if (info) channels.push({ id, ...info });
+  }
+  return json(200, { channels });
+}
+
 const pad = (id) => String(id).padStart(12, "0");
 const tsKey = (ts) => String(ts).padStart(15, "0");
 const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+const digest = async (s) => new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
 const sha256 = async (s) => hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))));
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
